@@ -1,0 +1,423 @@
+[ // https://www.nasdaq.com/market-activity/earnings
+  // The dates refer to the regular trading session preceeding the announcement. So T0 for evening and T-1 for morning announcements.
+  {
+    "Symbol": "CSCO",
+    "Date": "2023-08-16"
+  },
+  {
+    "Symbol": "CSCO",
+    "Date": "2023-11-15"
+  },
+  {
+    "Symbol": "CSCO",
+    "Date": "2024-02-14"
+  },
+  {
+    "Symbol": "ORCL",
+    "Date": "2023-09-11"
+  },
+  {
+    "Symbol": "ORCL",
+    "Date": "2023-12-11"
+  },
+  {
+    "Symbol": "DELL",
+    "Date": "2023-08-31"
+  },
+  {
+    "Symbol": "DELL",
+    "Date": "2023-11-30"
+  },
+  {
+    "Symbol": "DELL",
+    "Date": "2024-02-29"
+  },
+  {
+    "Symbol": "HPE",
+    "Date": "2023-05-30"
+  },
+  {
+    "Symbol": "HPE",
+    "Date": "2023-08-29"
+  },
+  {
+    "Symbol": "HPE",
+    "Date": "2023-11-28"
+  },
+  {
+    "Symbol": "HPE",
+    "Date": "2024-02-29"
+  },
+  {
+    "Symbol": "PFE",
+    "Date": "2023-05-02"
+  },
+  {
+    "Symbol": "PFE",
+    "Date": "2023-08-01"
+  },
+  {
+    "Symbol": "PFE",
+    "Date": "2023-10-31"
+  },
+  {
+    "Symbol": "AKAM",
+    "Date": "2023-05-09"
+  },
+  {
+    "Symbol": "A",
+    "Date": "2023-05-23"
+  },
+  {
+    "Symbol": "IPG",
+    "Date": "2023-07-21"
+  },
+  {
+    "Symbol": "FL",
+    "Date": "2023-05-19"
+  },
+  {
+    "Symbol": "AOS",
+    "Date": "2023-07-27"
+  },
+  {
+    "Symbol": "AOS",
+    "Date": "2023-04-27"
+  },
+  {
+    "Symbol": "AES",
+    "Date": "2023-05-04"
+  },
+  {
+    "Symbol": "LNT",
+    "Date": "2023-04-05"
+  },
+  {
+    "Symbol": "ALL",
+    "Date": "2023-05-03"
+  },
+  {
+    "Symbol": "ALL",
+    "Date": "2023-08-01"
+  },
+  {
+    "Symbol": "APD",
+    "Date": "2023-05-09"
+  },
+  {
+    "Symbol": "ARE",
+    "Date": "2023-07-24"
+  },
+  {
+    "Symbol": "ZBRA",
+    "Date": "2023-05-02"
+  },
+  {
+    "Symbol": "ZBRA",
+    "Date": "2023-08-01"
+  },
+  {
+    "Symbol": "ALLE",
+    "Date": "2023-04-26"
+  },
+  {
+    "Symbol": "ALLE",
+    "Date": "2023-07-26"
+  },
+  {
+    "Symbol": "ZTS",
+    "Date": "2023-05-04"
+  },
+  {
+    "Symbol": "ZBH",
+    "Date": "2023-05-02"
+  },
+  {
+    "Symbol": "ZBH",
+    "Date": "2023-08-01"
+  },
+  {
+    "Symbol": "MO",
+    "Date": "2023-04-27"
+  },
+  {
+    "Symbol": "MO",
+    "Date": "2023-08-01"
+  },
+  {
+    "Symbol": "HSBC",
+    "Date": "2023-10-30"
+  },
+  {
+    "Symbol": "HSBC",
+    "Date": "2024-02-20"
+  },
+  {
+    "Symbol": "PANW",
+    "Date": "2023-11-15"
+  },
+  {
+    "Symbol": "PANW",
+    "Date": "2024-02-20"
+  },
+  {
+    "Symbol": "PSA",
+    "Date": "2023-10-30"
+  },
+  {
+    "Symbol": "PSA",
+    "Date": "2024-02-20"
+  },
+  {
+    "Symbol": "O",
+    "Date": "2024-11-06"
+  },
+  {
+    "Symbol": "O",
+    "Date": "2024-02-20"
+  },
+  {
+    "Symbol": "CSGP",
+    "Date": "2024-02-20"
+  },
+  {
+    "Symbol": "CSGP",
+    "Date": "2023-10-24"
+  },
+  {
+    "Symbol": "FANG",
+    "Date": "2024-02-20"
+  },
+  {
+    "Symbol": "FANG",
+    "Date": "2023-11-06"
+  },
+  {
+    "Symbol": "RIO",
+    "Date": "2024-02-20"
+  },
+  {
+    "Symbol": "ADI",
+    "Date": "2024-02-20"
+  },
+  {
+    "Symbol": "ADI",
+    "Date": "2023-11-21"
+  },
+  {
+    "Symbol": "VRSK",
+    "Date": "2024-02-20"
+  },
+  {
+    "Symbol": "VRSK",
+    "Date": "2023-11-01"
+  },
+  {
+    "Symbol": "EXC",
+    "Date": "2024-02-20"
+  },
+  {
+    "Symbol": "EXC",
+    "Date": "2023-11-02"
+  },
+  {
+    "Symbol": "NVDA",
+    "Date": "2024-02-21"
+  },
+  {
+    "Symbol": "NVDA",
+    "Date": "2023-11-21"
+  },
+  {
+    "Symbol": "SNPS",
+    "Date": "2024-02-21"
+  },
+  {
+    "Symbol": "SNPS",
+    "Date": "2023-11-29"
+  },
+  {
+    "Symbol": "MRNA",
+    "Date": "2024-02-21"
+  },
+  {
+    "Symbol": "MRNA",
+    "Date": "2023-11-01"
+  },
+  {
+    "Symbol": "WDAY",
+    "Date": "2024-02-26"
+  },
+  {
+    "Symbol": "WDAY",
+    "Date": "2023-11-28"
+  },
+  {
+    "Symbol": "BIDU",
+    "Date": "2023-11-20"
+  },
+  {
+    "Symbol": "BIDU",
+    "Date": "2024-02-27"
+  },
+  {
+    "Symbol": "RY",
+    "Date": "2023-11-29"
+  },
+  {
+    "Symbol": "RY",
+    "Date": "2024-02-27"
+  },
+  {
+    "Symbol": "TJX",
+    "Date": "2023-11-14"
+  },
+  {
+    "Symbol": "TJX",
+    "Date": "2024-02-27"
+  },
+  {
+    "Symbol": "CRM",
+    "Date": "2023-11-29"
+  },
+  {
+    "Symbol": "CRM",
+    "Date": "2024-02-28"
+  },
+  {
+    "Symbol": "SNOW",
+    "Date": "2023-11-29"
+  },
+  {
+    "Symbol": "SNOW",
+    "Date": "2024-02-28"
+  },
+  {
+    "Symbol": "CRWD",
+    "Date": "2023-11-28"
+  },
+  {
+    "Symbol": "CRWD",
+    "Date": "2024-03-05"
+  },
+  {
+    "Symbol": "ROST",
+    "Date": "2023-11-16"
+  },
+  {
+    "Symbol": "ROST",
+    "Date": "2024-03-05"
+  },
+  {
+    "Symbol": "TGT",
+    "Date": "2023-11-14"
+  },
+  {
+    "Symbol": "TGT",
+    "Date": "2024-03-03"
+  },
+  {
+    "Symbol": "JD",
+    "Date": "2023-11-14"
+  },
+  {
+    "Symbol": "JD",
+    "Date": "2024-03-05"
+  },
+  {
+    "Symbol": "AVGO",
+    "Date": "2023-12-07"
+  },
+  {
+    "Symbol": "AVGO",
+    "Date": "2024-03-07"
+  },
+  {
+    "Symbol": "COST",
+    "Date": "2023-12-14"
+  },
+  {
+    "Symbol": "COST",
+    "Date": "2024-03-07"
+  },
+  {
+    "Symbol": "MRVL",
+    "Date": "2023-11-30"
+  },
+  {
+    "Symbol": "MRVL",
+    "Date": "2024-03-07"
+  },
+  {
+    "Symbol": "MDB",
+    "Date": "2023-12-05"
+  },
+  {
+    "Symbol": "MDB",
+    "Date": "2024-03-07"
+  },
+  {
+    "Symbol": "ONON",
+    "Date": "2023-11-13"
+  },
+  {
+    "Symbol": "ONON",
+    "Date": "2024-03-11"
+  },
+  {
+    "Symbol": "DLTR",
+    "Date": "2023-11-28"
+  },
+  {
+    "Symbol": "DLTR",
+    "Date": "2024-03-12"
+  },
+  {
+    "Symbol": "PATH",
+    "Date": "2023-11-30"
+  },
+  {
+    "Symbol": "PATH",
+    "Date": "2024-03-13"
+  },
+  {
+    "Symbol": "ORCL",
+    "Date": "2023-12-11"
+  },
+  {
+    "Symbol": "ORCL",
+    "Date": "2024-03-11"
+  },
+  {
+    "Symbol": "DG",
+    "Date": "2023-12-06"
+  },
+  {
+    "Symbol": "DG",
+    "Date": "2024-03-13"
+  },
+  {
+    "Symbol": "ADBE",
+    "Date": "2023-12-13"
+  },
+  {
+    "Symbol": "ADBE",
+    "Date": "2024-03-14"
+  },
+  {
+    "Symbol": "ULTA",
+    "Date": "2023-11-30"
+  },
+  {
+    "Symbol": "ULTA",
+    "Date": "2024-03-14"
+  },
+  {
+    "Symbol": "JBL",
+    "Date": "2023-12-13"
+  },
+  {
+    "Symbol": "JBL",
+    "Date": "2024-03-13"
+  }
+]
