@@ -712,7 +712,7 @@ def exportAtmIVBySym2(start, end, n=1,
     return atmIVsBySym
 
 
-def aewma(vec: Union[pd.Series, np.ndarray], alpha: float, gamma: float) -> np.ndarray:
+def aewma(vec: pd.Series | np.ndarray, alpha: float, gamma: float) -> np.ndarray:
     """adaptive exponentially weighted moving average. alpha-1, no smoothing always latest value. alpha 0 - max smooth always first value"""
     ewmas = np.zeros_like(vec)
     vec = vec.values if isinstance(vec, pd.Series) else vec

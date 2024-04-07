@@ -1,14 +1,13 @@
-from functools import partial
-from typing import Dict
-
 import pandas as pd
 import QuantLib as ql
+import plotly.graph_objs as go
 
+from functools import partial
+from typing import Dict
 from itertools import chain
 from datetime import date, timedelta, datetime
-import plotly.graph_objs as go
 from options.client import Client
-from options.helper import ps2iv, ps2delta, quotes2multi_index_df
+from options.helper import ps2iv, ps2delta, quotes2multi_index_df, aewma
 from options.typess.enums import TickType, Resolution, SecurityType
 from options.typess.equity import Equity
 from options.typess.option_contract import OptionContract
@@ -20,10 +19,34 @@ from markdown import markdown as md
 
 def run():
     """
-    Given a trade count and a time period, find the % of spread between 2 borders (bid/ask, ewma(bid/ask), etc.)
+    Given a trade count and a time period, find the optimal % of spread between 2 borders (bid/ask, ewma(bid/ask), etc.) to quote that ensures a certain fill rate.
+    Objectives:
+    - Improved earnings release option portfolio, because simulated fill price is using estimated discount rather than mid iv.
+      Therefore, options with low chance of fill will pay the spread and less likely appear as condidate for the portfolio.
 
-    For this, loading trade data only, plot fill as % of spread between 2 borders (bid/ask, ewma(bid/ask), etc.)
-    Plot how this metric rolls over time, essentially calibrating an estimator.
+    - Plot how these borders rolls over time.
+    - Calibrate an estimator of those borders.
+
+    Before plotting anything "over time", try it for a single time period...
+
+    If 100% discount, p_fill 100%. If 0% discount, it's also 100% if there is any volume on the opposite bid/ask. That's kinda wrong. Might be on a different exchange,
+    dark pool, off-exchange. So would want a minimum volume, eg, vol / 100. Anything below 1 is considered 0, hence no fill. Towards mid iv, that volume increases, hence p_fill increases.
+    So also need a cumulative volume metric per direction, from 0% discount towards mid iv.
+
+    Observations:
+    - volume depends a lot more on tenor, rather than delta/moneyness.
+    - volume is highest at ATM, and decreases as we move away from ATM.
+
+    Bucketing by expiry (not tenor) -> Histogram.
+    Further bucketing by delta -> Histogram.
+    How am I getting to an optimal discount here???
+    Need to apply filters. What's the volume at 0% discount, 50% discount, 100% discount.
+    Eventually regress exactly that or just pick one given overall volume trends up and down quite a bit.
+    Simplify.
+    Expecting a surface of volume by delta, tenor. So I need to cut the data into buckets, then plot the surface.
+
+    Improvements: None of above considers the vol of vol. Using EWMA or other smoothing methods could avoid following aggressive limit orders. What may be mid-iv in minute 0, could be a big discount in minute 1.
+    Therefore, need a reference column for buy/sell: 1) bid_close/ask_close, 2) ewma(bid_close)/ewma(ask_close)
     """
     syms = [Equity(s) for s in ['DELL']]
     # load all option trades in between
@@ -31,6 +54,7 @@ def run():
     start = date(2023, 11, 1)
     end = date(2023, 12, 31)
     resolution = Resolution.second
+    volume_divisor = 100
 
     client = Client()
     for equity in syms:
@@ -77,6 +101,9 @@ def run():
         day_count = ql.Actual365Fixed()
         df['bid_iv'] = df.apply(partial(ps2iv, price_col='bid_close', calendar=calendar, day_count=day_count, rate=rate, dividend=dividend), axis=1)
         df['ask_iv'] = df.apply(partial(ps2iv, price_col='ask_close', calendar=calendar, day_count=day_count, rate=rate, dividend=dividend), axis=1)
+        df['bid_iv_aewma'] = aewma(df['bid_iv'], 0.005, 0)
+        df['ask_iv_aewma'] = aewma(df['bid_iv'], 0.005, 0)
+
         df['bid_delta'] = df.apply(partial(ps2delta, iv_col='bid_iv', calendar=calendar, day_count=day_count, rate=rate, dividend=dividend), axis=1)
         df['ask_delta'] = df.apply(partial(ps2delta, iv_col='ask_iv', calendar=calendar, day_count=day_count, rate=rate, dividend=dividend), axis=1)
         df['mid_delta'] = (df['bid_delta'] + df['ask_delta']) / 2
@@ -129,50 +156,45 @@ def run():
     df = df.sort_index(level='ts')
     for col in ['volume_rolled_sum']:
         df[col] = None
-    for o, s_df in df.groupby('option_contract_str'):
+    # Wrong to sum over contract. delta/tenors change over roll.
+    df['tenor_bin'] = pd.cut(df['tenor'], bins=20)
+    df['delta_bin'] = pd.cut(abs(df['mid_delta']), bins=20)
+    for ix, s_df in df.groupby(['tenor_bin', 'delta_bin']):
         s_df['volume_rolled_sum'] = s_df[['volume']].reset_index().sort_values('ts').rolling(window=period, on='ts').sum('volume')['volume'].values
         df.loc[s_df.index, 'volume_rolled_sum'] = s_df['volume_rolled_sum']
 
-    # for o, s_df in df.groupby('option_contract_str'):
-    #     # print(o)
-    #     fig = plot_ps_trace(go.Scatter(x=s_df.index.get_level_values('ts'), y=s_df['volume_rolled_sum'], mode='markers', marker=dict(size=4), name=o))
-    #     fig.update_layout(title=f'Volume by delta for {equity} options', xaxis_title='TS', yaxis_title='Volume')
-    #     show(fig, fn=f'fig{o}.html')
-
     dft = df.loc[df.index.get_level_values('ts').min() + period:]
 
-    fig = plot_ps_trace(
-        go.Scatter(x=dft['tenor'], y=dft['volume_rolled_sum'], mode='markers', marker=dict(size=4), name='volume_rolled_sum')
-    )
-    fig.update_layout(title=f'Volume by delta for {equity} options', xaxis_title='Tenor', yaxis_title='Volume')
-    show(fig, fn='tenor.html')
-
-    # Rolled volume by delta, tenor  --- down the road, cnt_fills_over_period = f(delta, tenor) a regressor. Further, what's the fill_as_%_of_spread for these, can define as sth gaussian? mean, std, skew, kurtosis.
-    # So expected volume, a mean % fill, an std, should be able to calc some prob(fill | % spread)...
-    # So I need both, decent volume and decent fill_as_%_of_spread. Latter may not be an issue and same distibution no matter volume. check the mean.. also a surface by tenor, delta then...
-    # That'll determine target price, IV, etc...
-
-    dft['cut'] = pd.cut(dft['tenor'], bins=20)
-    for cut, s_df in dft.groupby('cut'):
-        fig = plot_ps_trace(
-            go.Scatter(x=abs(s_df['mid_delta']), y=s_df['volume_rolled_sum'], mode='markers', marker=dict(size=4), name='volume_rolled_sum')
-        )
-        fig.update_layout(title=f'Volume by delta for {equity} options', xaxis_title='Delta', yaxis_title='Volume')
-        show(fig, fn=f'vol_by_delta{cut}.html')
-
-    df[df['volume_rolled_sum'] <= 1]['volume_rolled_sum']
-
-    # groupby week
-
-    df['week'] = df.index.get_level_values('ts').to_series().apply(lambda x: x.week).values
-    df.groupby('week')['volume_rolled_sum'].mean().plot()
-    for week, s_df in df.groupby('week'):
-        
-        fig = plot_ps_trace(
-            go.Scatter(x=s_df['mid_delta'], y=s_df['volume_rolled_sum'], mode='markers', marker=dict(size=4), name='volume_rolled_sum')
-        )
-        fig.update_layout(title=f'Volume by delta for {equity} options', xaxis_title='Tenor', yaxis_title='Volume')
-        show(fig, fn=f'week{week}.html')
+    # fig = plot_ps_trace(
+    #     go.Scatter(x=dft['tenor'], y=dft['volume_rolled_sum'], mode='markers', marker=dict(size=4), name='volume_rolled_sum')
+    # )
+    # fig.update_layout(title=f'Volume by delta for {equity} options', xaxis_title='Tenor', yaxis_title='Volume')
+    # show(fig, fn='tenor.html')
+    #
+    # # Rolled volume by delta, tenor  --- down the road, cnt_fills_over_period = f(delta, tenor) a regressor. Further, what's the fill_as_%_of_spread for these, can define as sth gaussian? mean, std, skew, kurtosis.
+    # # So expected volume, a mean % fill, an std, should be able to calc some prob(fill | % spread)...
+    # # So I need both, decent volume and decent fill_as_%_of_spread. Latter may not be an issue and same distibution no matter volume. check the mean.. also a surface by tenor, delta then...
+    # # That'll determine target price, IV, etc...
+    #
+    # dft['cut'] = pd.cut(dft['tenor'], bins=20)
+    # for cut, s_df in dft.groupby('cut'):
+    #     fig = plot_ps_trace(
+    #         go.Scatter(x=abs(s_df['mid_delta']), y=s_df['volume_rolled_sum'], mode='markers', marker=dict(size=4), name='volume_rolled_sum')
+    #     )
+    #     fig.update_layout(title=f'Volume by delta for {equity} options', xaxis_title='Delta', yaxis_title='Volume')
+    #     show(fig, fn=f'vol_by_delta{cut}.html')
+    #
+    # # groupby week
+    #
+    # df['week'] = df.index.get_level_values('ts').to_series().apply(lambda x: x.week).values
+    # df.groupby('week')['volume_rolled_sum'].mean().plot()
+    # for week, s_df in df.groupby('week'):
+    #
+    #     fig = plot_ps_trace(
+    #         go.Scatter(x=s_df['mid_delta'], y=s_df['volume_rolled_sum'], mode='markers', marker=dict(size=4), name='volume_rolled_sum')
+    #     )
+    #     fig.update_layout(title=f'Volume by delta for {equity} options', xaxis_title='Tenor', yaxis_title='Volume')
+    #     show(fig, fn=f'week{week}.html')
 
 
 if __name__ == "__main__":
