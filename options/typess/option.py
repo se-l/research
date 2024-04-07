@@ -68,6 +68,9 @@ class Option:
         self.am_option = engined_option(ql.VanillaOption(self.payoff, self.am_exercise), self.get_bsm(), optionPricingModel=OptionPricingModel.CoxRossRubinstein)
         self.eu_option = engined_option(ql.VanillaOption(self.payoff, self.eu_exercise), self.get_bsm(), optionPricingModel=OptionPricingModel.AnalyticEuropeanEngine)
 
+    @property
+    def underlying_symbol(self): return self.optionContract.underlying_symbol
+
     def SetPriceUnderlying(self, priceUnderlying: float):
         self.underlyingQuote.setValue(priceUnderlying)
 
@@ -94,7 +97,7 @@ class Option:
             self.calculationDateQl = _calculationDateQl
             self.calculationDate = date(_calculationDateQl.year(), _calculationDateQl.month(), _calculationDateQl.dayOfMonth())
 
-    @lru_cache(maxsize=1024)
+    @lru_cache(maxsize=2**12)
     def iv(self, priceOption: float, priceUnderlying: float, calculationDate: date) -> float:
         """
         Calculate implied volatility from a series of option prices.
@@ -139,7 +142,7 @@ class Option:
         flat_vol_ts = ql.BlackVolTermStructureHandle(ql.BlackConstantVol(self.calculationDateQl, self.calendar, self.volQuoteHandle, self.dayCount))
         return ql.BlackScholesMertonProcess(self.underlyingQuoteHandle, dividend_yield, flat_ts, flat_vol_ts)
 
-    @lru_cache(maxsize=2**10)
+    @lru_cache(maxsize=2**12)
     def npv(self, vol: float, priceUnderlying: float, calculationDate: datetime.date):
         """
         # For very large IV values, npv() starts failing... for far OTM/ITM, assume value to be intrinsic only...
@@ -160,14 +163,13 @@ class Option:
             return self.intrinsic_value()
         return self.eu_option.NPV()
 
-    @lru_cache(maxsize=2**10)
+    @lru_cache(maxsize=2**12)
     def delta(self, vol, priceUnderlying, calculationDate):
         self.SetEvaluationDateToCalcDate(calculationDate)
         if priceUnderlying != self.underlyingQuote.value():
             self.underlyingQuote.setValue(priceUnderlying)
         if vol != self.volQuote.value():
             self.volQuote.setValue(vol)
-
         return self.eu_option.delta()
 
     def intrinsic_value(self, priceUnderlying: float = None):
@@ -200,14 +202,14 @@ class Option:
 
 
 if __name__ == '__main__':
-    calculationDate = date(2024, 2, 27)
-    contract = OptionContract('contract', 'HPE', date(2026, 1, 16), Decimal('35.0'), OptionRight.put)
+    calculationDate = date(2024, 3, 14)
+    contract = OptionContract('contract', 'ONON', date(2024, 4, 5), Decimal('42.0'), OptionRight.put)
     ql.Settings.instance().evaluationDate = ql.Date(calculationDate.day, calculationDate.month, calculationDate.year)
     option = Option(contract)
 
-    option.iv(15.055, 22.5, calculationDate)
-    option.iv(14.915, 22.5, calculationDate)
-    option.iv(14.915, 21.5, calculationDate)
+    print(option.iv(12.05, 28.15, calculationDate))
+    print(option.iv(14.35, 28.15, calculationDate))
+
     print(f'NPV: {option.npv(0.356, 310.1, calculationDate)}')
     
     option.volQuote.setValue(0.411)
@@ -217,8 +219,8 @@ if __name__ == '__main__':
     # option.underlyingQuote.setValue(17.49825)
 
 
-    print(f'Delta: {option.delta()}')
-    print(f'Theta: {option.theta()}')
+    # print(f'Delta: {option.delta()}')
+    # print(f'Theta: {option.theta()}')
 
     # print(f'ThetaPerDay: {option.thetaPerDay()}')
     # print(f'Vega: {option.vega()}')

@@ -1,8 +1,12 @@
+import multiprocessing
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 import datetime
 import os
 
+from pathlib import Path
 from collections import defaultdict, Counter
 from decimal import Decimal
 from functools import reduce
@@ -14,8 +18,16 @@ from shared.constants import file_root
 from options.typess.enums import TickType, CsvHeader, Resolution, SecurityType
 from options.typess.equity import Equity
 from options.typess.option_contract import OptionContract
+from shared.modules.logger import logger
 
 bp = 10_000
+
+
+@dataclass
+class CsvNmSymDt:
+    csv_nm: str
+    symbol: Equity | OptionContract
+    dt: datetime.date
 
 
 class Client:
@@ -56,85 +68,93 @@ class Client:
             return {c for c in contracts if c.expiry >= as_of or c.issue_date <= as_of}
 
     def history(self, symbols: Iterable[Union[Equity, OptionContract]], start: datetime.date, end: datetime.date, resolution: Resolution.minute, tick_type: TickType.quote, security_type) -> Dict[str, pd.DataFrame]:
+        """
+        This is fairly slow when reading quotes, sec resolution. Can mp over files ideally an open each zip file only once.
+        """
+        if resolution in (Resolution.hour, Resolution.daily):
+            return self.history_hour_day(symbols, start, end, resolution, tick_type, security_type)
+
+        output = {}
+        dct_path_csvs: Dict[Path, List[CsvNmSymDt]] = defaultdict(list)
+
+        for symbol in symbols:
+            if isinstance(symbol, Equity) and tick_type == TickType.quote and resolution in (Resolution.daily, Resolution.hour):
+                raise ValueError('There is no quote equity data for daily or hourly resolution.')
+            start_ = max(start, symbol.issue_date) if isinstance(symbol, OptionContract) and symbol.issue_date else start
+            end_ = min(end, symbol.expiry) if isinstance(symbol, OptionContract) and symbol.expiry else end
+            if start_ > end_:  # contract not traded in this period
+                continue
+
+            for dt in pd.date_range(start_, end_, freq='D'):
+                if dt.weekday() in (5, 6):
+                    continue
+
+                underlying_folder = symbol.underlying_symbol.lower() if isinstance(symbol, OptionContract) else str(symbol).lower()
+                zip_fn = symbol.zip_name(tick_type, resolution, dt)
+                file_full_path = Path(os.path.join(self.root, security_type, self.market, resolution, underlying_folder, zip_fn))
+                # Want to unzip each file only once, hence first collect all the csvs to be read per zip file
+                if os.path.exists(file_full_path):
+                    csv_name = symbol.csv_name(tick_type, resolution, dt)
+                    dct_path_csvs[file_full_path].append(CsvNmSymDt(csv_name, symbol, dt.date()))
+                else:
+                    logger.warning(f'Missing {file_full_path}. Not fetched or exchange holiday?')
+
+        # # This step can be parallelized
+        # for file_full_path, csv_names in dct_path_csvs.items():
+        #     result = read_option_csvs_from_zip(file_full_path, csv_names, symbol, dt, tick_type)
+        #     for k, v in result.items():
+        #         output[k] = v
+        # Parallelize this step
+        if dct_path_csvs:
+            with multiprocessing.Pool(multiprocessing.cpu_count() // 2) as pool:
+                for result in pool.starmap(read_option_csvs_from_zip, [(file_full_path, pathSymDts, tick_type) for file_full_path, pathSymDts in dct_path_csvs.items()]):
+                    for k, v in result.items():
+                        if k in output:
+                            output[k] = pd.concat([output[k], v]).sort_index()
+                        else:
+                            output[k] = v
+        return output
+
+    def history_hour_day(self, symbols: Iterable[Union[Equity, OptionContract]], start: datetime.date, end: datetime.date, resolution: Resolution.minute, tick_type: TickType.quote, security_type) -> Dict[str, pd.DataFrame]:
         output = {}
         for symbol in symbols:
             if isinstance(symbol, Equity) and tick_type == TickType.quote and resolution in (Resolution.daily, Resolution.hour):
                 raise ValueError('There is no quote equity data for daily or hourly resolution.')
             start_ = max(start, symbol.issue_date) if isinstance(symbol, OptionContract) and symbol.issue_date else start
             end_ = min(end, symbol.expiry) if isinstance(symbol, OptionContract) and symbol.expiry else end
-            if resolution in (Resolution.minute, Resolution.second):
-                for dt in pd.date_range(start_, end_, freq='D'):
-                    if dt.weekday() in (5, 6):
+            if start_ > end_:  # contract not traded in this period
+                continue
+            # ignoring year for now
+            directory = os.path.join(self.root, security_type, self.market, resolution)
+            fns = set()
+            for dt in [start, end]:
+                fns.add(symbol.zip_name(tick_type, resolution, dt))
+            for fn in list(sorted(fns)):
+                file_full_path = Path(os.path.join(directory, fn))
+                if not os.path.exists(file_full_path):
+                    continue
+
+                csv_name = symbol.csv_name(tick_type, resolution, start)
+                # print('Opening', os.path.join(directory, file), csv_name)
+                with ZipFile(file_full_path, 'r') as zipObj:
+                    if csv_name not in zipObj.namelist():
+                        logger.warning(f'Missing {csv_name} in {file_full_path}')
                         continue
-                    date = dt.strftime('%Y%m%d')
-                    underlying_folder = symbol.underlying_symbol.lower() if isinstance(symbol, OptionContract) else str(symbol).lower()
-                    for directory, subdirectories, files in os.walk(os.path.join(self.root, security_type, self.market, resolution, underlying_folder)):
-                        for file in files:
-                            if file.endswith('.zip') and file[:8] == date and tick_type in file:
-                                csv_name = symbol.csv_name(tick_type, resolution, dt)
-                                # print('Opening', os.path.join(directory, file), csv_name)
-                                # expected_contracts = {fn for fn in contracts if fn.split('.')[0][-8:] > date}
-                                with ZipFile(os.path.join(directory, file), 'r') as zipObj:
-                                    if csv_name not in zipObj.namelist():
-                                        print(f'Missing {csv_name} in {file}')
-                                        continue
-                                    try:
-                                        df: pd.DataFrame = pd.read_csv(zipObj.open(csv_name), names=getattr(CsvHeader, tick_type), index_col=False)
-                                    except Exception as e:
-                                        print(f'Error reading file: fn: {os.path.join(directory, file)}, csv: {csv_name}. {e}')
-                                        raise e
-                                    if df.empty:
-                                        continue
-                                    if tick_type in (TickType.iv_quote, TickType.iv_trade):
-                                        df = df[~df['mid_price_underlying'].isna()]
-                                    df['time'] = df['time'] / 1000
-                                    # dt_tz = datetime.fromtimestamp(gp_ticks[0].time, tz=pytz.UTC).astimezone(pytz.timezone(TZ_USEASTERN))
-                                    df['time'] += (dt.date() - datetime.date(1970, 1, 1)).total_seconds()
-                                    ix_out_of_bound_ts = df.index[df['time'] > 3605962001]
-                                    if ix_out_of_bound_ts.any():
-                                        print(f'Out of bound timestamps in {file}: {len(ix_out_of_bound_ts)}')
-                                        df.drop(ix_out_of_bound_ts, inplace=True)
-                                    df['time'] = pd.to_datetime(df['time'], unit='s')
-                                    df.set_index('time', inplace=True)
-
-                                    for c in [c for c in df.columns if any((n in c for n in ('open', 'high', 'low', 'close')))]:
-                                        df[c] = df[c] / bp
-
-                                    if str(symbol) in output:
-                                        output[str(symbol)] = pd.concat([output[str(symbol)], df])
-                                    else:
-                                        output[str(symbol)] = df
-            else:
-                # ignoring year for now
-                directory = os.path.join(self.root, security_type, self.market, resolution)
-                fns = set()
-                for dt in [start, end]:
-                    fns.add(symbol.zip_name(tick_type, resolution, dt))
-                for fn in list(sorted(fns)):
-                    if not os.path.exists(os.path.join(directory, fn)):
+                    df: pd.DataFrame = pd.read_csv(zipObj.open(csv_name), names=getattr(CsvHeader, tick_type), index_col=False)
+                    if df.empty:
                         continue
+                    if tick_type in (TickType.iv_trade, TickType.iv_quote):
+                        df = df[~df['mid_price_underlying'].isna()]
+                    df['time'] = pd.to_datetime(df['time'], format='%Y%m%d %H:%M')
+                    df.set_index('time', inplace=True)
+                    df = df.loc[start:end + datetime.timedelta(days=1)]
+                    for c in [c for c in df.columns if any((n in c for n in ('open', 'high', 'low', 'close')))]:
+                        df[c] = df[c] / bp
 
-                    csv_name = symbol.csv_name(tick_type, resolution, start)
-                    # print('Opening', os.path.join(directory, file), csv_name)
-                    with ZipFile(os.path.join(directory, fn), 'r') as zipObj:
-                        if csv_name not in zipObj.namelist():
-                            print(f'Missing {csv_name} in {fn}')
-                            continue
-                        df: pd.DataFrame = pd.read_csv(zipObj.open(csv_name), names=getattr(CsvHeader, tick_type), index_col=False)
-                        if df.empty:
-                            continue
-                        if tick_type in (TickType.iv_trade, TickType.iv_quote):
-                            df = df[~df['mid_price_underlying'].isna()]
-                        df['time'] = pd.to_datetime(df['time'], format='%Y%m%d %H:%M')
-                        df.set_index('time', inplace=True)
-                        df = df.loc[start:end+datetime.timedelta(days=1)]
-                        for c in [c for c in df.columns if any((n in c for n in ('open', 'high', 'low', 'close')))]:
-                            df[c] = df[c] / bp
-
-                        if str(symbol) in output:
-                            output[str(symbol)] = pd.concat([output[str(symbol)], df])
-                        else:
-                            output[str(symbol)] = df
+                    if str(symbol) in output:
+                        output[str(symbol)] = pd.concat([output[str(symbol)], df])
+                    else:
+                        output[str(symbol)] = df
         return output
 
     @staticmethod
@@ -191,7 +211,7 @@ class Client:
                     max_n_strike = max(sorted([s for s in (strikes - ps_high) if s > 0])[:n]) + ps_high
                     min_n_strike = min(sorted([s for s in (strikes - ps_low) if s < 0], reverse=True)[:n]) + ps_low
                 except ValueError as e:
-                    print(f'Error: {e}')
+                    logger.error(f'Error: {e}')
                     continue
                 if max_n_strike >= c.strike >= min_n_strike:
                     out_contracts[c.expiry].add(c)
@@ -234,9 +254,48 @@ class Client:
                             csv_name = contract.csv_name(tick_type, resolution, dt)
                             with ZipFile(os.path.join(directory, file), 'r') as zipObj:
                                 if csv_name not in zipObj.namelist():
-                                    print(f'Missing {csv_name} in {file}')
+                                    logger.warning(f'Missing {csv_name} in {file}')
                                     missing_contracts[dt].append(contract)
         return missing_contracts
+
+
+def read_option_csvs_from_zip(file_full_path: Path, csvNmSymDts: List[CsvNmSymDt], tick_type: TickType) -> Dict[str, pd.DataFrame]:
+    output = {}
+    with ZipFile(file_full_path, 'r') as zipObj:
+        for csvNmSymDt in csvNmSymDts:
+            csv_name, symbol, dt = csvNmSymDt.csv_nm, csvNmSymDt.symbol, csvNmSymDt.dt
+            if csv_name not in zipObj.namelist():
+                logger.warning(f'Missing {csv_name} in {file_full_path.name}')
+                continue
+            try:
+                df: pd.DataFrame = pd.read_csv(zipObj.open(csv_name), names=getattr(CsvHeader, tick_type), index_col=False)
+            except Exception as e:
+                logger.error(f'Error reading file: fn: {file_full_path}, csv: {csv_name}. {e}')
+                raise e
+            if df.empty:
+                continue
+            if tick_type in (TickType.iv_quote, TickType.iv_trade):
+                df = df[~df['mid_price_underlying'].isna()]
+            df['time'] = df['time'] / 1000
+            # dt_tz = datetime.fromtimestamp(gp_ticks[0].time, tz=pytz.UTC).astimezone(pytz.timezone(TZ_USEASTERN))
+            df['time'] += (dt - datetime.date(1970, 1, 1)).total_seconds()
+            ix_out_of_bound_ts = df.index[df['time'] > 3605962001]
+            if ix_out_of_bound_ts.any():
+                logger.info(f'Out of bound timestamps in {file_full_path.name}: {len(ix_out_of_bound_ts)}')
+                df.drop(ix_out_of_bound_ts, inplace=True)
+            df['time'] = pd.to_datetime(df['time'], unit='s')
+            df.set_index('time', inplace=True)
+
+            for c in [c for c in df.columns if any((n in c for n in ('open', 'high', 'low', 'close')))]:
+                df[c] = df[c] / bp
+
+            if str(symbol) in output:
+                logger.error(f'Duplicate symbol {symbol} in {file_full_path.name}')
+
+            output[str(symbol)] = df
+
+    logger.info(f'Finished parsing {file_full_path}')
+    return output
 
 
 if __name__ == '__main__':

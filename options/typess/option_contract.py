@@ -17,6 +17,10 @@ class OptionContract(Symbol):
     option_style: str = OptionStyle.american
     multiplier: int = 100
 
+    def __post_init__(self):
+        self.symbol = self.symbol.upper()
+        self.underlying_symbol = self.underlying_symbol.upper()
+
     @classmethod
     def from_filename(cls, filename: str, issue_date=None):
         if filename[:8].isdigit():  # Minute: 20230627_akam_minute_quote_american_put_1800000_20240119.csv"
@@ -39,19 +43,21 @@ class OptionContract(Symbol):
 
     def csv_name(self, tick_type: TickType, resolution: Resolution, date: datetime.date = None):
         if resolution in (Resolution.minute, Resolution.second, Resolution.tick) and date:  # for minute, second, tick
-            return f'{date.strftime("%Y%m%d")}_{self.symbol}_{resolution}_{tick_type}_{self.option_style}_{self.right}_{int(self.strike * 10000)}_{self.expiry.strftime("%Y%m%d")}.csv'
+            return f'{date.strftime("%Y%m%d")}_{self.symbol}_{resolution}_{tick_type}_{self.option_style}_{self.right}_{int(self.strike * 10000)}_{self.expiry.strftime("%Y%m%d")}.csv'.lower()
         else:
-            return f'{self.underlying_symbol}_{tick_type}_{self.option_style}_{self.right}_{int(self.strike * 10000)}_{self.expiry.strftime("%Y%m%d")}.csv'
+            return f'{self.underlying_symbol}_{tick_type}_{self.option_style}_{self.right}_{int(self.strike * 10000)}_{self.expiry.strftime("%Y%m%d")}.csv'.lower()
 
-    def zip_name(self, tick_type: TickType, resolution: Resolution, date: datetime.date = None):
+    def zip_name(self, tick_type: TickType, resolution: Resolution, date: datetime.date):
         if resolution in (Resolution.daily, Resolution.hour):
-            return f'{self.underlying_symbol}_{date.year}_{tick_type}_american.zip'
+            return f'{self.underlying_symbol}_{date.year}_{tick_type}_american.zip'.lower()
         else:
-            return f'{date.strftime("%Y%m%d")}_{tick_type}_american.zip'
+            return f'{date.strftime("%Y%m%d")}_{tick_type}_american.zip'.lower()
 
     def ib_symbol(self):
         # print('WARNING: strike may not be accurate')
-        return f'{self.underlying_symbol.upper()}  {self.expiry.strftime("%y%m%d")}{self.right[0].upper()}{str(int(self.strike*1000)).zfill(8)}'
+        sym = self.underlying_symbol
+        sym += ' ' * (6 - len(sym))
+        return f'{sym}{self.expiry.strftime("%y%m%d")}{self.right[0]}{str(int(self.strike*1000)).zfill(8)}'.upper()
 
     @classmethod
     def from_ib_symbol(cls, ib_symbol: str):
@@ -65,7 +71,7 @@ class OptionContract(Symbol):
         return cls(underlying_symbol, underlying_symbol, expiry, strike, right)
 
     def __repr__(self):
-        return f'{self.underlying_symbol.lower()}_{self.option_style}_{self.right}_{int(self.strike * 10000)}_{self.expiry.strftime("%Y%m%d")}'
+        return f'{self.underlying_symbol}_{self.option_style}_{self.right}_{int(self.strike * 10000)}_{self.expiry.strftime("%Y%m%d")}'.lower()
 
     def __hash__(self):
         return hash(self.__repr__())

@@ -1,19 +1,19 @@
 import multiprocessing
-from functools import partial
-
-# import QuantLib as ql
 import numpy as np
 import pandas as pd
-from plotly.subplots import make_subplots
-from plotly import graph_objects as go
 
+from functools import partial
 from shared.utils.decorators import time_it
 from shared.constants import EarningsPreSessionDates
-from options.helper import year_quarter, skew_measure2target_metric
-from options.typess.enums import OptionRight, Resolution, SkewMeasure
+from options.helper import year_quarter
+from options.typess.enums import Resolution
 from options.typess.equity import Equity
 from options.typess.option_frame import OptionFrame
 from shared.plotting import show
+from plotly.subplots import make_subplots
+from scipy.optimize import curve_fit
+from sklearn.metrics import r2_score
+from plotly import graph_objects as go
 
 
 class IVSurface:
@@ -24,44 +24,7 @@ class IVSurface:
     def __init__(self, underlying: Equity, df: pd.DataFrame):
         self.underlying = underlying
         self.df = df
-        self.v_ah_srf = {OptionRight.call: {}, OptionRight.put: {}}
-        # self.day_count = ql.Actual365Fixed()
         self.df_ah = pd.DataFrame()
-
-    # @time_it
-    # def interpolate_ah(self):
-    #     for right, s_df in self.df.groupby('right'):
-    #         for ts, ss_df in s_df.groupby('ts'):
-    #             calculation_date_ql = to_ql_dt(ts)
-    #             spot_quote_handle = ql.QuoteHandle(ql.SimpleQuote(ss_df['spot'].iloc[0]))
-    #             calibration_set = get_calibration_set(ss_df, right)
-    #             ah_vol_interpolation = ql.AndreasenHugeVolatilityInterpl(calibration_set, spot_quote_handle, self.yield_ts(calculation_date_ql), self.dividend_ts(calculation_date_ql))
-    #             ah_vol_surface = ql.AndreasenHugeVolatilityAdapter(ah_vol_interpolation)
-    #             self.v_ah_srf[right][ts] = ah_vol_surface
-
-    def other_interpol(self):
-        # ql.BicubicSpline(s_df['expiry'], s_df['strike'], s_df['mid_iv'])
-        pass
-
-    # def enrich_iv_ah(self, iv_col='mid_iv'):
-    #     iv_col_ah = iv_col + '_ah'
-    #     if not self.v_ah_srf[OptionRight.call]:
-    #         self.interpolate_ah()
-    #     self.df[iv_col_ah] = None
-    #     for right, s_df in self.df.groupby('right'):
-    #         for ts, ss_df in s_df.groupby('ts'):
-    #             for expiry, sss_df in ss_df.groupby('expiry'):
-    #                 tenor = (datetime.combine(expiry, datetime.min.time()) - ts).days / 365
-    #                 v_iv = []
-    #                 for strike in sss_df.index.get_level_values('strike'):
-    #                     try:
-    #                         v_iv.append(self.v_ah_srf[right][ts].blackVol(tenor, float(strike)))
-    #                     except RuntimeError as e:
-    #                         v_iv.append(np.nan)
-    #
-    #                 self.df.loc[(ts, expiry, slice(None), right), iv_col_ah] = v_iv
-    #
-    #     print(f'enrich_iv_ah: {iv_col_ah}. Total Values: {self.df[iv_col_ah].count()}. # NA: {self.df[iv_col_ah].isna().sum()}, # Zero: {(self.df[iv_col_ah] == 0).sum()}')
 
     @time_it
     def enrich_iv_curvature(self, iv_col='mid_iv'):
@@ -70,52 +33,49 @@ class IVSurface:
         for right, s_df in self.df.groupby('right'):
             for ts, ss_df in s_df.groupby('ts'):
                 for expiry, sss_df in ss_df.groupby('expiry'):
-                    sorted_df = sss_df.sort_index(level='strike')
+                    # sorted_df = sss_df.sort_index(level='strike')
+                    sorted_df = sss_df.sort_values('moneyness')
                     strikes = sorted_df.index.get_level_values('strike')
+                    x_val = strikes.astype(float).values
+                    # x_val = sorted_df['moneyness'].values
                     v_iv = sorted_df[iv_col].values
 
                     # interpolate nans and zeros
-                    x = strikes[np.isnan(v_iv) | (v_iv == 0)]
-                    xp = strikes[~np.isnan(v_iv) & (v_iv != 0)]
+                    x = x_val[np.isnan(v_iv) | (v_iv == 0)].astype(float)
+                    xp = x_val[~np.isnan(v_iv) & (v_iv != 0)].astype(float)
                     if len(xp) > 0:
                         fp = v_iv[~np.isnan(v_iv) & (v_iv != 0)]
                         y = np.interp(x, xp, fp, left=None, right=None, period=None)
                         v_iv[np.isnan(v_iv) | (v_iv == 0)] = y
 
-                    iv_curvature = np.gradient(np.gradient(v_iv))
+                    iv_curvature = np.gradient(v_iv, x_val)
+
+                    # Insert extrapolating here for 0, np.nan values
+
+                    ix_x = np.argwhere(np.isnan(iv_curvature) | (iv_curvature == 0)).flatten()
+                    ix_p = np.argwhere((~np.isnan(iv_curvature)) & (iv_curvature != 0)).flatten()
+                    if len(ix_x) > 0 and len(ix_p) > 0:
+                        # extrapolate, interpolate
+                        x = x_val[ix_x]
+                        xp = x_val[ix_p]
+                        fp = iv_curvature[ix_p]
+                        y = np.interp(x, xp, fp, left=None, right=None, period=None)
+                        iv_curvature[ix_x] = y
+
                     self.df.loc[(ts, expiry, strikes, right), iv_col_curvature] = iv_curvature
+
         print(f'enrich_iv_curvature: iv_col={iv_col_curvature}, Total Values: {self.df[iv_col_curvature].count()}. # NA: {self.df[iv_col_curvature].isna().sum()}, # Zero: {(self.df[iv_col_curvature] == 0).sum()}')
+        enrich_regressed_skew(self.df)
 
-    @time_it
-    def enrich_skew_measures(self, skew_measure: SkewMeasure, ref_measure_col='ask_delta', ref_iv_col='mid_iv'):
-        skew_col_nm = f'skew_{skew_measure}'
-        ix_strike = 2
-        for expiry, s_df in self.df.groupby(level='expiry'):
-            for right, ss_df in s_df.groupby(level='right'):
-
-                for ts, sss_df in ss_df.groupby(level='ts'):
-                    if (sss_df[ref_measure_col] != 0).sum() < 2:
-                        continue
-                    measure0, measure1 = skew_measure2target_metric(skew_measure=skew_measure, right=right)
-
-                    strike0 = (sss_df[ref_measure_col] - measure0).abs().idxmin()[ix_strike]
-                    strike1 = (sss_df[ref_measure_col] - measure1).abs().idxmin()[ix_strike]
-
-                    delta0 = sss_df.loc[(ts, expiry, strike0, right), ref_measure_col]
-                    delta1 = sss_df.loc[(ts, expiry, strike1, right), ref_measure_col]
-
-                    if delta0 == 0 or delta1 == 0 or np.isnan(delta0) or np.isnan(delta1):
-                        skew = np.nan
-                    else:
-                        iv0 = sss_df.loc[(ts, expiry, strike0, right), ref_iv_col]
-                        iv1 = sss_df.loc[(ts, expiry, strike1, right), ref_iv_col]
-                        skew = (iv1 - iv0) / (delta1 - delta0)
-
-                    self.df.loc[(ts, expiry, slice(None), right), skew_col_nm] = skew
-        print(f'enrich_iv_curvature: skew_measure={skew_measure}, Total Values: {self.df[skew_col_nm].count()}. # NA: {self.df[skew_col_nm].isna().sum()}, # Zero: {(self.df[skew_col_nm] == 0).sum()}')
+    def mp_enrich_mean_regressed_skew_ds(self, v_ds_ret, n_processes=12):
+        with multiprocessing.Pool(n_processes) as p:
+            frames = p.map(partial(enrich_mean_regressed_skew_for_ds, df=self.df), v_ds_ret)
+            if frames:
+                concat = pd.concat(frames, axis=1)
+                for c in concat.columns:
+                    self.df[c] = concat[c]
 
     def mp_enrich_div_skew_of_ds(self, v_ds_pct, iv_col='mid_iv', n_processes=8):
-        # TypeError: cannot pickle 'SwigPyObject' object
         with multiprocessing.Pool(n_processes) as p:
             frames = p.map(partial(self.enrich_div_skew_of_ds, df=self.df, iv_col=iv_col), v_ds_pct)
         if frames:
@@ -134,6 +94,7 @@ class IVSurface:
         For large dS, it spans multiple strikes. Should intermediate strikes be considered? No, let's only consider the strikes
         closest to target s0, s1.
         """
+        raise NotImplementedError('This method was implemented for a previous use case. might get refactored to roll smooth iv 3rd moment and gradient.')
         col_nm = f'div_skew_ds_{ds_pct:.2f}'
         df[col_nm] = None
         s1 = df['spot'] * (1 + ds_pct)
@@ -202,97 +163,197 @@ class IVSurface:
 
         return df[[col_nm, col_nm_rolling]]
 
-#     @lru_cache()
-#     def yield_ts(self, calculation_date_ql: ql.Date):
-#         return ql.YieldTermStructureHandle(ql.FlatForward(calculation_date_ql, DiscountRateMarket, self.day_count))
-#
-#     @lru_cache()
-#     def dividend_ts(self, calculation_date_ql: ql.Date):
-#         return ql.YieldTermStructureHandle(ql.FlatForward(calculation_date_ql, DividendYield[str(self.underlying)], self.day_count))
-#
-#
-# def get_calibration_set(df, option_right: str, iv_col='mid_iv'):
-#     calibrationSet = ql.CalibrationSet()
-#
-#     for expiry, s_df in df.groupby('expiry'):
-#         for strike, ss_df in s_df.groupby('strike'):
-#             iv = ss_df[iv_col].iloc[0]
-#             if np.isnan(iv):
-#                 continue
-#
-#             payoff = ql.PlainVanillaPayoff(str2ql_option_right(option_right), float(strike))
-#             exercise = ql.EuropeanExercise(to_ql_dt(expiry))
-#
-#             calibrationSet.push_back((ql.VanillaOption(payoff, exercise), ql.SimpleQuote(iv)))
-#
-#     return calibrationSet
+
+def a_bx_cx2(x, a, b, c):
+    return a + b * x + c * x ** 2
+
+
+def enrich_regressed_skew(df, window=10, x='strike', y='mid_iv_curvature', plot=False, ts_plot=None):
+    """
+    Regressing the central moment of the IV surface. This is the skew of the IV surface.
+    Applying more weight to ATM IV, IV more uncertain the further OTM/ITM it is. That'll be a sigma array, where sigma~abs(1-moneyness) or sigma~abs(ln(moneyness))
+    Enforcing a smirk/smile like shape by setting bounds on the regression coefficients.
+    Saving each regression coefficient to the frame.
+    """
+    bounds = ((-np.inf, 0, -np.inf), (0, np.inf, 0))
+
+    df['mid_iv_curvature_a'] = None
+    df['mid_iv_curvature_b'] = None
+    df['mid_iv_curvature_c'] = None
+    df['strike'] = df.index.get_level_values('strike').astype(float)
+
+    v_ts = sorted(df.index.get_level_values('ts').unique())
+
+    # roll over a ts window container window ts items
+    for ps_ts_window in pd.Series(v_ts).rolling(window=window):
+        v_ts_window = ps_ts_window.dropna().values
+        # more sample use all data points after 10am.
+        # ts_scoped = list(sorted([ts for ts in df.index.get_level_values('ts').unique() if ts.hour >= 10]))[-window:]
+        df_scoped = df.loc[v_ts_window]
+        # df_scoped = df_scoped[df_scoped['tenor'] > 0.5]
+        df_scoped = df_scoped[(df_scoped['moneyness'] > 0.6) & (df_scoped['moneyness'] < 1.4)]
+
+        expiries = df_scoped.index.get_level_values('expiry').unique()
+        if plot:
+            fig = make_subplots(rows=len(expiries)*2+2, cols=2)
+            r2s = []
+
+        for k, (expiry, s_df) in enumerate(df_scoped.groupby(level='expiry')):
+            for l, (right, ss_df) in enumerate(s_df.groupby(level='right')):
+                # print(f'{expiry} {right}')
+                if (~ss_df[y].isna()).sum() == 0:
+                    continue
+
+                ix_compatible = ss_df[y].reset_index().index[ss_df[y].notna()]
+                # popt, pcov = curve_fit(a_bx_cx2, ss_df[x].values[ix_compatible], ss_df[y].values[ix_compatible], bounds=bounds)
+                # popt, pcov = curve_fit(a_bx_cx2, ss_df[x].values[ix_compatible], ss_df[y].values[ix_compatible])
+
+                # More weight to ATM IV, IV more uncertain the further OTM/ITM it is. That'll be a sigma array, where sigma~abs(1-moneyness) or sigma~abs(ln(moneyness))
+                sigma = np.exp(((np.abs(ss_df['moneyness'] - 1) + 1) ** 2).astype(float).values[ix_compatible])
+                popt, pcov = curve_fit(a_bx_cx2, ss_df[x].values[ix_compatible], ss_df[y].values[ix_compatible], bounds=bounds, sigma=sigma)
+
+                try:
+                    df.loc[(v_ts_window[-1], expiry, slice(None), right), 'mid_iv_curvature_a'] = popt[0]
+                    df.loc[(v_ts_window[-1], expiry, slice(None), right), 'mid_iv_curvature_b'] = popt[1]
+                    df.loc[(v_ts_window[-1], expiry, slice(None), right), 'mid_iv_curvature_c'] = popt[2]
+                except Exception as e:
+                    continue
+
+                if plot and ts_plot == v_ts_window[-1]:
+                    ix_scope = ss_df[(ss_df['moneyness'] > 0.8) & (ss_df['moneyness'] < 1.2)].index
+                    y_pred = a_bx_cx2(ss_df.loc[ix_scope, x], *popt)
+                    r2 = r2_score(ss_df.loc[ix_scope, y], y_pred)
+                    r2s.append(r2)
+                    # if r2 < 0.1:
+                    #     pass
+                    print(f'R2 Quadratic Regr. {right} {expiry}: {r2}')
+                    fig.add_trace(go.Scatter(x=ss_df[x].values, y=ss_df['mid_iv'].values, mode='markers', name=f'IV {y} {expiry} {right}', marker=dict(size=2)), row=k*2 + 1, col=l + 1)
+                    fig.add_trace(go.Scatter(x=ss_df[x].values, y=ss_df[y].values, mode='markers', name=f'Skew {y} {expiry} {right}', marker=dict(size=2)), row=k*2+2, col=l + 1)
+                    ix_plottable = y_pred.reset_index(drop=True).index[y_pred.abs() > 1/10**10]
+                    yv = y_pred.iloc[ix_plottable].astype(float).values
+                    fig.add_trace(go.Scatter(x=ss_df[x].values[ix_plottable], y=yv, mode='markers', name=f'Regressed {y} {expiry} {right}', marker=dict(size=3)), row=k*2+2, col=l+1)
+
+        if plot and ts_plot == v_ts_window[-1]:
+            print(f'Mean R2: {np.mean(r2s)}')
+            fig.update_layout(title_text=f'Regressed {y} {ts_plot}')
+            show(fig, 'skew_regression.html')
+
+    df['mid_iv_curvature_regressed'] = df['mid_iv_curvature_a'] + df['mid_iv_curvature_b'] * df['strike'] + df['mid_iv_curvature_c'] * df['strike'] ** 2
+    df.drop(columns=['strike'], inplace=True)
+
+
+def col_nm_mean_regressed_skew_ds(ds_ret):
+    return f'mean_regressed_skew_for_ds_{ds_ret:.2f}'
+
+
+def enrich_mean_regressed_skew_for_ds(ds_ret: float, df: pd.DataFrame):
+    # Average all skews up to a K close to -ds
+
+    col_nm = col_nm_mean_regressed_skew_ds(ds_ret)
+    if col_nm not in df.columns:
+        df[col_nm] = None
+
+    df_strikes = df.index.get_level_values('strike').unique()
+
+    # Refactor this: bad code duplication
+
+    if 'ts' in df.index.names:
+        for ts, ts_df in df.groupby('ts'):
+
+            s0 = ts_df['spot'].iloc[0]
+            ds = s0 * ds_ret - s0
+            strike2strike2average = {}
+            for strike in df_strikes:
+                final_strike = float(strike) + ds
+                if final_strike < float(strike):
+                    strike2strike2average[strike] = df_strikes[(final_strike <= df_strikes.astype(float)) & (df_strikes.astype(float) <= float(strike))]
+                else:
+                    strike2strike2average[strike] = df_strikes[(float(strike) <= df_strikes.astype(float)) & (df_strikes.astype(float) <= final_strike)]
+
+            for expiry, s_df in ts_df.groupby(level='expiry'):
+                for right, ss_df in s_df.groupby(level='right'):
+                    strikes = ss_df.index.get_level_values('strike')
+                    expected_d_iv = []
+                    for strike in strikes:
+                        strikes_to_avg = strike2strike2average[strike].intersection(strikes)
+                        expected_d_iv.append(ss_df.loc[(ts, expiry, strikes_to_avg, right), 'mid_iv_curvature_regressed'].mean())
+
+                    df.loc[(ts, expiry, strikes, right), col_nm] = expected_d_iv
+    else:
+        s0 = df['spot'].iloc[0]
+        ds = s0 * ds_ret - s0
+        strike2strike2average = {}
+        for strike in df_strikes:
+            final_strike = float(strike) + ds
+            if final_strike < float(strike):
+                strike2strike2average[strike] = df_strikes[(final_strike <= df_strikes.astype(float)) & (df_strikes.astype(float) <= float(strike))]
+            else:
+                strike2strike2average[strike] = df_strikes[(float(strike) <= df_strikes.astype(float)) & (df_strikes.astype(float) <= final_strike)]
+
+        for expiry, s_df in df.groupby(level='expiry'):
+            for right, ss_df in s_df.groupby(level='right'):
+                strikes = ss_df.index.get_level_values('strike')
+                expected_d_iv = []
+                for strike in strikes:
+                    strikes_to_avg = strike2strike2average[strike].intersection(strikes)
+                    expected_d_iv.append(ss_df.loc[(expiry, strikes_to_avg, right), 'mid_iv_curvature_regressed'].mean())
+
+                df.loc[(expiry, strikes, right), col_nm] = expected_d_iv
+
+    print(f'enrich_mean_regressed_skew_for_ds: ds_ret={ds_ret:.2f} , Total Values: {df[col_nm].count()}. # NA: {df[col_nm].isna().sum()}, # Zero: {(df[col_nm] == 0).sum()}')
+    return df[col_nm]
 
 
 if __name__ == '__main__':
     sym = 'ORCL'
     sym = 'ONON'
+    sym = 'TGT'
     equity = Equity(sym)
-    resolution = Resolution.second
+    resolution = Resolution.minute
     seq_ret_threshold = 0.005
     release_date = EarningsPreSessionDates(sym)[-1]
-    marker_size = 4
+    marker_size = 2
 
     option_frame = OptionFrame.load_frame(equity, resolution, seq_ret_threshold, year_quarter(release_date))
     df = option_frame.df_options.sort_index()
 
     print(f'Loaded df shape: {df.shape}')
-    # Small frame to debug
-    # df = df.loc[(slice(None), date(2024, 3, 8), slice(None), 'call'), :]
 
     if True:
         iv_surface = IVSurface(equity, df)
-        # iv_surface.enrich_iv_ah()
         iv_surface.enrich_iv_curvature(iv_col='mid_iv')
-        # iv_surface.enrich_iv_curvature(iv_col='mid_iv_ah')
-        # iv_surface.enrich_skew_measures(SkewMeasure.Delta25Delta50, ref_measure_col='delta', ref_iv_col='mid_iv')
-        # iv_surface.enrich_skew_measures(SkewMeasure.Delta25Delta50, ref_measure_col='delta', ref_iv_col='mid_iv_ah')
-
-        v_dS = [-0.1, 0.1]
-        # v_dS = np.linspace(0.8, 1.2, 41)
-        iv_surface.mp_enrich_div_skew_of_ds(v_dS)
-
-    # What I need to with skew? calc dSdIV to get better risk and hedge ratio estimate...
-    # For scenario modelling, IV level before after were okay. That's the skew of 2 points, start & destination.
-    # Then I'd get skew measures for dS 1%, ... x%. Now these would vary by expiry and strike.
+        enrich_regressed_skew(iv_surface.df, plot=True, ts_plot=release_date)
+        # enrich_mean_regressed_skew_for_ds(0.9, iv_surface.df)
 
     # Further, would want to experiment with multiple smoothing techniques for the skew measures.
-    # Rolling EWMA, AH IV measures, outlier removal
+    # Rolling EWMA, outlier removal
 
-    # Plot skew of dS on a given date. One point per option... Only selected far expiries These plots are rather noisy because they go across days.
-    for ds in [0.9, 1.1]:
-        figSkewSkewDs = make_subplots(rows=4, cols=2, shared_xaxes=True, subplot_titles=("Mid IV Call", 'Mid IV Put', "Mid IV Curvature call", 'curv put', f"Skew of dS {100*ds}% call"))
-        col = f'div_skew_ds_{ds-1:.2f}'
-        col_nm_rolling = f'div_skew_ds_{ds-1:.2f}_rolling'
-        delta_skew_col_nm = f'skew_{SkewMeasure.Delta25Delta50}'
-        sampled_df = df[(df['moneyness'] > 0.8) & (df['moneyness'] < 1.2)]
-        for i, (dt, s_df) in enumerate(sampled_df.groupby('date')):
-            if i >= 1:
-                break
-            for expiry, ss_df in s_df.groupby('expiry'):
-                for k, (right, sss_df) in enumerate(ss_df.groupby('right')):
-                    figSkewSkewDs.add_trace(go.Scatter(x=sss_df['moneyness'], y=sss_df['mid_iv'], mode='markers', name=f'IV {right} {expiry}', marker=dict(size=marker_size)), row=1, col=k+1)
-                    figSkewSkewDs.add_trace(go.Scatter(x=sss_df['moneyness'], y=sss_df['mid_iv_curvature'], mode='markers', name=f'IV Curvature {right} {expiry}', marker=dict(size=marker_size)), row=2, col=k+1)
-                    figSkewSkewDs.add_trace(go.Scatter(x=sss_df['moneyness'], y=sss_df[col], mode='markers', name=f'Skew {right} {expiry}', marker=dict(size=marker_size)), row=3, col=k+1)
-                    figSkewSkewDs.add_trace(go.Scatter(x=sss_df['moneyness'], y=sss_df[col_nm_rolling], mode='markers', name=f'Skew {right} {expiry}', marker=dict(size=marker_size)), row=4, col=k+1)
-                    figSkewSkewDs.add_vline(x=1, line_width=1, line_dash="dash", line_color="black", row=3, col=1)
-        figSkewSkewDs.add_vline(x=1, line_width=1, line_dash="dash", line_color="black", row=1, col=1)
-        figSkewSkewDs.update_layout(title_text=f'Skew of dS {100*ds}%', xaxis_title='Moneyness', yaxis_title='IV')
-        show(figSkewSkewDs)
+    #  plot IV, curvature + regressed skew of every expiry, error plot. That plot better be static.
 
-    # plot skew across time. rolling average, reset at SOD.
-    figRollingSkew = make_subplots(rows=2, cols=2, shared_xaxes=True, subplot_titles=("Skew Rolling Call", "Skew Rolling Put"))
-    for o, ds in enumerate([-0.1, 0.1]):
-        for k, (right, s_df) in enumerate(df.groupby('right')):
-            for expiry, ss_df in s_df.groupby('expiry'):
-                ts = ss_df.index.get_level_values('ts')
-                skew_rolling = ss_df[f'div_skew_ds_{ds:.2f}_rolling']
-                figRollingSkew.add_trace(go.Scatter(x=ts, y=skew_rolling, mode='lines+markers', name=f'{right} {expiry} {ds:.2f}_rolling'), row=o+1, col=k+1)
-    show(figRollingSkew)
+    sample_df = df[(df['moneyness'] > 0.8) & (df['moneyness'] < 1.2)]
+    plot_dt = release_date
+    sample_df = sample_df.loc[np.array([ts.date() for ts in sample_df.index.get_level_values('ts')]) == plot_dt]
+    expiries = sample_df.index.get_level_values('expiry').unique()
+
+    nm = col_nm_mean_regressed_skew_ds(0.9)
+    figSkew = make_subplots(rows=len(expiries), cols=4, subplot_titles=['IV', 'IV Curvature Regr.', nm, 'RMSE IV Curvature regr.'])
+    for i, expiry in enumerate(expiries):
+        r = i+1
+        s_df = sample_df.loc[(slice(None), expiry, slice(None))]
+        for k, (right, ss_df) in enumerate(s_df.groupby('right')):
+            figSkew.add_trace(go.Scatter(x=ss_df['moneyness'], y=ss_df['mid_iv'], mode='markers', name=f'{right} IV {expiry}', marker=dict(size=marker_size)), row=r, col=1)
+            # figSkew.add_trace(go.Scatter(x=ss_df['moneyness'], y=ss_df['mid_iv_curvature'], mode='markers', name=f'IV Curvature {right} {expiry}', marker=dict(size=marker_size)), row=r, col=2)
+            figSkew.add_trace(go.Scatter(x=ss_df['moneyness'], y=ss_df['mid_iv_curvature_regressed'], mode='markers', name=f'{right} IV Curvature regr. {expiry}', marker=dict(size=marker_size)), row=r, col=2)
+
+            figSkew.add_trace(go.Scatter(x=ss_df['moneyness'], y=ss_df[nm], mode='markers', name=f'{right} {nm} {expiry}', marker=dict(size=marker_size)), row=r, col=3)
+
+            # plot mae RMSE by moneyness
+            # figSkew.add_trace(go.Scatter(x=ss_df['moneyness'], y=ss_df['mid_iv_curvature_regressed'] - ss_df['mid_iv_curvature'], mode='markers', name=f'MAE IV Curvature regr. {right} {expiry}', marker=dict(size=marker_size)), row=r, col=3)
+            figSkew.add_trace(go.Scatter(x=ss_df['moneyness'], y=(ss_df['mid_iv_curvature_regressed'] - ss_df['mid_iv_curvature'])**2, mode='markers', name=f' {right} RMSE IV Curvature regr.{expiry}', marker=dict(size=marker_size)), row=r, col=4)
+            # figSkew.add_vline(x=1, line_width=1, line_dash="dash", line_color="black", row=3, col=1)
+    # figSkew.add_vline(x=1, line_width=1, line_dash="dash", line_color="black", row=1, col=1)
+    figSkew.update_layout(title_text=f'plot_dt={plot_dt}', xaxis_title='Moneyness')
+    show(figSkew)
 
     # calculate error in estimation of dSdIV combining a dS shift * skew adjusted for a measured shift in ATM(exp). So essentially removing the effect of term structure / horizontal
     # only leaving vertical!

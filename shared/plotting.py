@@ -36,7 +36,7 @@ def plot_iv_cones(implied_volatility, cones, confidence_levels):
     fig.show()
 
 
-def show(fig, fn: str = 'fig.html', rel_dir='figures'):
+def show(fig, fn: str = 'fig.html', rel_dir='figures', open_browser=True):
     if get_ipython() and get_ipython().config:
         fig.show()
         return
@@ -46,7 +46,8 @@ def show(fig, fn: str = 'fig.html', rel_dir='figures'):
 
     path_fn = Path.joinpath(path_dir, fn)
     fig.write_html(path_fn)
-    webbrowser.open(path_fn)
+    if open_browser:
+        webbrowser.open(path_fn)
 
 
 def load_plot_overall_volatility(sym, start, end, expiry=None, n=2):
@@ -147,7 +148,7 @@ def plot_iv_overall(style_df):
     fig = go.Figure()
     for style, ps, in style_df.items():
         fig.add_trace(go.Scatter(x=ps.index, y=100 * ps.values, name=f'{style}_mid_iv', mode='markers',
-                                 marker=dict(size=2), yaxis="y1"))
+                                 marker=dict(size=3), yaxis="y1"))
 
     fig.update_layout(**yIVxTime)  # Update layout and show figure
     fig.show()
@@ -219,16 +220,18 @@ yAnyxTime = dict(height=600, width=1000, margin=dict(l=0, r=0, t=0, b=0),
                  )
 
 
-def plot_ps_trace(*traces):
+def plot_ps_trace(*traces, show=True):
     fig = go.Figure()
     for trace in traces:
         if isinstance(trace, pd.Series):
             ps = trace
-            fig.add_trace(go.Scatter(x=ps.index, y=ps, mode='markers', marker=dict(size=2)))
+            fig.add_trace(go.Scatter(x=ps.index, y=ps, mode='markers', marker=dict(size=3)))
         else:
             fig.add_trace(trace)
     fig.update_layout(**yAnyxTime)  # Update layout and show figure
-    fig.show()
+    if show:
+        fig.show()
+    return fig
 
 
 def plot_iv(mat_df, contracts, expiry, rights=('',), strikes=('',)):  # Create three line graphs
@@ -238,11 +241,11 @@ def plot_iv(mat_df, contracts, expiry, rights=('',), strikes=('',)):  # Create t
         symbol = str(contract)
         df = mat_df[symbol]
         if any((s in symbol for s in rights)) and any((s in symbol for s in strikes)):
-            fig.add_trace(go.Scatter(x=df.index, y=100 * df['mid_iv'], name=f'{symbol}_mid_iv', mode='markers', marker=dict(size=2)),
+            fig.add_trace(go.Scatter(x=df.index, y=100 * df['mid_iv'], name=f'{symbol}_mid_iv', mode='markers', marker=dict(size=3)),
                           row=1, col=1)
     underlying = str(contracts[expiry][0]).split('_')[0]
     df = mat_df[str(contracts[expiry][0])]
-    fig.add_trace(go.Scatter(x=df.index, y=df['mid_close_underlying'], name=f'Underlying {underlying}', mode='markers', marker=dict(size=2)),
+    fig.add_trace(go.Scatter(x=df.index, y=df['mid_close_underlying'], name=f'Underlying {underlying}', mode='markers', marker=dict(size=3)),
                   row=2, col=1)
 
     fig.update_layout(**yIVxDateTime)  # Update layout and show figure
@@ -256,7 +259,7 @@ def plot_iv_time_of_day(mat_df, contracts, expiry, rights='', strikes=''):  # Cr
         df = mat_df[symbol]
         if any((s in symbol for s in rights)) and any((s in symbol for s in strikes)):
             fig.add_trace(go.Scatter(x=df.index.time, y=100 * df['mid_iv'], name=f'{symbol}_mid_iv', mode='markers',
-                                     marker=dict(size=2), yaxis="y1"))
+                                     marker=dict(size=3), yaxis="y1"))
 
     fig.update_layout(**yIVxTime)  # Update layout and show figure
     fig.show()

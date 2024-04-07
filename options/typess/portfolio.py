@@ -1,3 +1,4 @@
+import numpy as np
 import datetime
 import pandas as pd
 
@@ -9,10 +10,14 @@ from options.typess.equity import Equity
 
 
 class Portfolio(Mapping):
-    holdings: dict
+    holdings: defaultdict
 
     def __init__(self, holdings: dict = None):
-        self.holdings = defaultdict(int) if holdings is None else holdings
+        self.holdings = defaultdict(int, holdings or {})
+
+    @property
+    def underlying(self):
+        return next(iter(self.holdings.keys())).underlying_symbol.upper() if len(self.holdings) > 0 else None
 
     def add_holding(self, security, quantity):
         self.holdings[security] += quantity
@@ -27,6 +32,12 @@ class Portfolio(Mapping):
                 deltaTotal += q
             else:
                 iv = val_from_df(df, sec.expiry, sec.optionContract.strike, sec.right, iv_col)
+                if np.isnan(iv) or iv == 0:
+                    price = val_from_df(df, sec.expiry, sec.optionContract.strike, sec.right, 'mid_price')
+                    spot = val_from_df(df, sec.expiry, sec.optionContract.strike, sec.right, 'spot')
+                    iv = sec.iv(price, spot, calcDate)
+                if np.isnan(iv) or iv == 0:
+                    iv = atm_iv(df, sec.expiry, s)
                 iv = atm_iv(df, sec.expiry, s) if iv == 0 else iv
                 deltaTotal += sec.delta(iv, s, calcDate) * q * sec.multiplier
         return deltaTotal

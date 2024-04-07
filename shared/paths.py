@@ -19,3 +19,4 @@ class Paths:
 
     analytics = rf'C:\repos\quantconnect\Lean\Launcher\bin\Analytics'
     path_earnings = path_earnings if os.path.exists(path_earnings) else os.path.join(common, 'EarningsAnnouncements.json')
+    path_models = Path(r'D:\trade\models')
