@@ -24,7 +24,10 @@ class Logger(logging.Logger):
 
 
 # to be refactored once more than 1 channel is necessary. Cannot be Singleton there, rather cached
-logger = Logger()
+log = logger = Logger()
+info = logger.info
+warning = logger.warning
+error = logger.error
 
 
 if __name__ == '__main__':

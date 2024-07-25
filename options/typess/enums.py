@@ -25,6 +25,7 @@ class OptionRight:
         else:
             raise ValueError(f'Unknown option right: {s}')
 
+
 class TickType:
     trade = 'trade'
     quote = 'quote'
@@ -40,6 +41,20 @@ class TickType:
             return cls.quote
         else:
             raise ValueError(f'Unknown tick type: {s}')
+
+
+class TickDirection:
+    up = 1
+    down = -1
+
+    @classmethod
+    def from_string(cls, s):
+        if s in ('up',):
+            return cls.up
+        elif s in ('down',):
+            return cls.down
+        else:
+            raise ValueError(f'Unknown tick direction: {s}')
 
 
 class SecurityType:
@@ -93,3 +108,7 @@ class SkewMeasure:
     M90M100 = 'M90M100'
     M90M110 = 'M90M110'
     M100M110 = 'M100M110'
+
+
+class Market:
+    usa = 'usa'

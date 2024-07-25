@@ -1,16 +1,14 @@
 import multiprocessing
-from dataclasses import dataclass
-
 import numpy as np
 import pandas as pd
 import datetime
 import os
 
+from dataclasses import dataclass
 from pathlib import Path
 from collections import defaultdict, Counter
 from decimal import Decimal
 from functools import reduce
-from itertools import chain
 from typing import List, Dict, Union, Set, Iterable
 from zipfile import ZipFile
 
@@ -71,6 +69,8 @@ class Client:
         """
         This is fairly slow when reading quotes, sec resolution. Can mp over files ideally an open each zip file only once.
         """
+        from options.helper import is_holiday  # local to avoid circular import
+
         if resolution in (Resolution.hour, Resolution.daily):
             return self.history_hour_day(symbols, start, end, resolution, tick_type, security_type)
 
@@ -86,7 +86,7 @@ class Client:
                 continue
 
             for dt in pd.date_range(start_, end_, freq='D'):
-                if dt.weekday() in (5, 6):
+                if is_holiday(dt):
                     continue
 
                 underlying_folder = symbol.underlying_symbol.lower() if isinstance(symbol, OptionContract) else str(symbol).lower()
@@ -106,14 +106,28 @@ class Client:
         #         output[k] = v
         # Parallelize this step
         if dct_path_csvs:
-            with multiprocessing.Pool(multiprocessing.cpu_count() // 2) as pool:
-                for result in pool.starmap(read_option_csvs_from_zip, [(file_full_path, pathSymDts, tick_type) for file_full_path, pathSymDts in dct_path_csvs.items()]):
-                    for k, v in result.items():
-                        if k in output:
-                            output[k] = pd.concat([output[k], v]).sort_index()
-                        else:
-                            output[k] = v
+            if os.getppid() == 0:  # main process, not daemon
+                with multiprocessing.Pool(multiprocessing.cpu_count() // 4) as pool:
+                    results = pool.starmap(read_option_csvs_from_zip, [(file_full_path, pathSymDts, tick_type) for file_full_path, pathSymDts in dct_path_csvs.items()])
+            else:
+                results = [read_option_csvs_from_zip(file_full_path, pathSymDts, tick_type) for file_full_path, pathSymDts in dct_path_csvs.items()]
+
+            for result in results:
+                for k, v in result.items():
+                    if k in output:
+                        output[k] = pd.concat([output[k], v]).sort_index()
+                    else:
+                        output[k] = v
         return output
+
+    def date_present(self, symbol: Equity, date: datetime.date, security_type: SecurityType) -> bool:
+        resolution = Resolution.minute
+        underlying_folder = symbol.underlying_symbol.lower() if isinstance(symbol, OptionContract) else str(symbol).lower()
+
+        zip_fn_trade = OptionContract.get_zip_name(str(symbol), TickType.trade, resolution, date) if security_type == SecurityType.option else symbol.zip_name(TickType.trade, resolution, date)
+        file_full_path_trade = Path(os.path.join(self.root, security_type, self.market, resolution, underlying_folder, zip_fn_trade))
+
+        return os.path.exists(file_full_path_trade)
 
     def history_hour_day(self, symbols: Iterable[Union[Equity, OptionContract]], start: datetime.date, end: datetime.date, resolution: Resolution.minute, tick_type: TickType.quote, security_type) -> Dict[str, pd.DataFrame]:
         output = {}
@@ -218,10 +232,10 @@ class Client:
 
         return out_contracts
 
-    def get_contracts(self, symbol: Equity, as_of: datetime.date = None, strike_range=(0, 999999)) -> Dict[datetime.date, List[OptionContract]]:
-        as_of = as_of or datetime.date.today()
+    def get_contracts(self, symbol: Equity, start: datetime.date = None, end: datetime.date = None, strike_range=(0, 999999)) -> Dict[datetime.date, List[OptionContract]]:
+        as_of = end or datetime.date.today()
         out_contracts: Dict[datetime.date, List[OptionContract]] = defaultdict(list)
-        contracts = self.option_contracts(str(symbol), as_of)
+        contracts = self.option_contracts(str(symbol), as_of=end, start=start)
         for mat_date in {c.expiry for c in contracts}:
             out_contracts[mat_date] += [c for c in contracts if c.expiry == mat_date and strike_range[0] <= c.strike <= strike_range[1]]
         return out_contracts
@@ -240,11 +254,13 @@ class Client:
         return df
 
     def list_missing_contracts(self, symbol: Equity, resolution, tick_type, security_type=SecurityType.option) -> Dict[datetime.date, List[OptionContract]]:
+        from options.helper import is_holiday  # local to avoid circular import
+
         missing_contracts = defaultdict(list)
         contracts = self.option_contracts(str(symbol))
         for contract in contracts:
             for dt in pd.date_range(start, end, freq='D'):
-                if dt.weekday() in (5, 6) or dt.date() >= contract.expiry or dt.date() < contract.issue_date:
+                if is_holiday(dt) or dt.date() >= contract.expiry or dt.date() < contract.issue_date:
                     continue
                 date = dt.strftime('%Y%m%d')
                 underlying_folder = symbol.underlying_symbol.lower() if isinstance(symbol, OptionContract) else str(symbol).lower()
@@ -299,19 +315,22 @@ def read_option_csvs_from_zip(file_full_path: Path, csvNmSymDts: List[CsvNmSymDt
 
 
 if __name__ == '__main__':
+    # from options.helper import is_holiday
     start = datetime.date(2023, 9, 5)
     end = datetime.date(2023, 10, 11)
     client = Client()
     sym = 'dell'
     equity = Equity(sym)
 
+    # print(is_holiday(datetime.date(2024, 1, 15)))
+
     # ivs = client.history([equity], start, end, Resolution.minute, TickType.iv_quote, SecurityType.equity)
     # print(ivs)
-    contracts = client.central_volatility_contracts(equity, start, end, n=8)
+    # contracts = client.central_volatility_contracts(equity, start, end, n=8)
     # contracts = contracts[datetime.date(2023, 8, 18)]
     # contracts = [c for c in contracts if c.strike == 16]
-    contracts = list(chain(*contracts.values()))
-    ivs = client.history(contracts, start, end, Resolution.second, TickType.iv_quote, SecurityType.option)
+    # contracts = list(chain(*contracts.values()))
+    # ivs = client.history(contracts, start, end, Resolution.second, TickType.iv_quote, SecurityType.option)
     # print(contracts)
     # ivs = client.history(contracts, start, end, Resolution.second, TickType.iv_quote, SecurityType.option)
     # ivs = client.history(list(chain(*contracts.values())), start, end, Resolution.second, TickType.iv_quote, SecurityType.option)

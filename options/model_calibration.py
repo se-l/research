@@ -402,7 +402,7 @@ def calibrate_heston_model_from_market_data(ts: pd.Timestamp, quotes: Dict[Optio
     print(f'Calibration took {(time.time() - t0)/60} minutes')
 
     ts_str = calibration_params.ts.strftime('%Y%m%d_%H%M%S')
-    with open(os.path.join(Paths.analytics, 'calibration', 'tmp', f'heston_calibration_results_{calibration_params.option_right}_{ts_str}.pkl'), 'wb') as f:
+    with open(os.path.join(Paths.path_calibration, 'tmp', f'heston_calibration_results_{calibration_params.option_right}_{ts_str}.pkl'), 'wb') as f:
         pickle.dump(calibration_result, f)
 
     return calibration_result
@@ -632,6 +632,7 @@ def calibration_error_df(srf, df_in: pd.DataFrame) -> pd.DataFrame:
     df['error'] = df['iv_ah'] / df['mid_iv'] - 1
     return df
 
+
 def srf_pricer_interpolator(df: pd.DataFrame, ts: datetime.datetime, plot=False):
     x = np1d_from_df(df, 'strike')
     y = np1d_from_df(df, 'expiry')
@@ -651,11 +652,6 @@ def srf_pricer_interpolator(df: pd.DataFrame, ts: datetime.datetime, plot=False)
         plot_surface(Z, X[0], Y[:, 0])
     return interp
 
-def interpolate_pt(interp: LinearNDInterpolator, x, y) -> np.array:
-    _x = np.array([x]) if isinstance(x, (int, float)) else x
-    _y = np.array([y]) if isinstance(y, (int, float))  else y
-    return interp(_x, _y)
-
 
 def bt_heston_param_mean_reversion(min_util_long=0.05, min_util_short=-0.05):
     """
@@ -665,7 +661,7 @@ def bt_heston_param_mean_reversion(min_util_long=0.05, min_util_short=-0.05):
     Further, raw data cleaning and AH interpolation further removed opportunities to arb value. There is no continuous market IV surface to test against... AH without cleaning at most...
     """
 
-    with open(os.path.join(Paths.analytics, 'calibration', 'hestonCalibrationResults_put_2024-01-28T130807.pkl'), 'rb') as f:
+    with open(os.path.join(Paths.path_calibration, 'hestonCalibrationResults_put_2024-01-28T130807.pkl'), 'rb') as f:
         heston_calibration_results: List[HestonCalibrationResult] = pickle.load(f)
     heston_calibration_results = [r for r in heston_calibration_results if r and r.error < 100]
 
@@ -985,7 +981,7 @@ def calibrate_heston_models_over_time():
 def concat_calibrated_tmp_files():
     option_right = None
     hestonCalibrationResults = []
-    for _dir, dirs, fns in os.walk(os.path.join(Paths.analytics, 'calibration', 'tmp')):
+    for _dir, dirs, fns in os.walk(os.path.join(Paths.path_calibration, 'tmp')):
         for fn in fns:
             if option_right is None:
                 option_right = 'put' if '_put_' in fn else 'call'
@@ -993,10 +989,10 @@ def concat_calibrated_tmp_files():
                 hestonCalibrationResults.append(pickle.load(f))
     ts_str = datetime.datetime.now().isoformat().replace(':', '')[:17]
 
-    with open(os.path.join(Paths.analytics, 'calibration', f'hestonCalibrationResults_{option_right}_{ts_str}.pkl'), 'wb') as f:
+    with open(os.path.join(Paths.path_calibration, f'hestonCalibrationResults_{option_right}_{ts_str}.pkl'), 'wb') as f:
         pickle.dump(hestonCalibrationResults, f)
 
-    for _dir, dirs, fns in os.walk(os.path.join(Paths.analytics, 'calibration', f'calibration', 'tmp')):
+    for _dir, dirs, fns in os.walk(os.path.join(Paths.path_calibration, f'calibration', 'tmp')):
         for fn in fns:
             os.remove(os.path.join(_dir, fn))
 

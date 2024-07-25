@@ -1,3 +1,7 @@
+import json
+import traceback
+from hashlib import sha256
+
 import QuantLib as ql
 import pandas as pd
 import numpy as np
@@ -13,6 +17,8 @@ from importlib import reload
 from itertools import chain
 from arbitragerepair import constraints, repair
 from matplotlib import gridspec
+from scipy.interpolate import LinearNDInterpolator
+from scipy.interpolate.interpnd import NDInterpolatorBase
 from scipy.signal import savgol_filter
 from sklearn.linear_model import LinearRegression
 from scipy.optimize import curve_fit
@@ -20,15 +26,50 @@ from sklearn.metrics import r2_score
 
 import options.client as mClient
 import options.volatility.implied as mImplied
-from options.typess.enums import Resolution, TickType, SecurityType, GreeksEuOption, SkewMeasure
+from options.typess.enums import Resolution, TickType, SecurityType, GreeksEuOption, SkewMeasure, OptionRight
 from options.typess.option_contract import OptionContract
 from options.typess.equity import Equity
 from options.typess.option_frame import OptionFrame
-from shared.constants import EarningsPreSessionDates
-from shared.modules.logger import logger
+from shared.constants import EarningsPreSessionDates, DividendYield, DiscountRateMarket
+from shared.modules.logger import logger, info, error, warning
+
+from shared.paths import Paths
 
 reload(mClient)
 client = mClient.Client()
+
+
+def ps2mid_iv_if_nonzero(ps: pd.Series) -> pd.Series:
+    # if ps['ask_iv'] == 0 or ps['bid_iv'] == 0:
+    #     return np.nan  # pd.Series(np.empty(ps.shape), index=ps.index)
+    return (ps['ask_iv'] + ps['bid_iv']) / 2
+
+
+def load_option_trades(contracts, start, end, resolution) -> Dict[OptionContract, pd.DataFrame]:
+    trades = client.history(contracts, start, end, resolution, TickType.trade, SecurityType.option)
+    return {OptionContract.from_contract_nm(k): v for k, v in trades.items()}
+
+
+def join_spot(dct_option_df: Dict[OptionContract, pd.DataFrame], ps_spot: pd.Series):
+    for k, df in dct_option_df.items():
+        df.index.name = 'ts'
+        df = df.merge(ps_spot.rename('spot'), how='outer', right_index=True, left_index=True).sort_index()
+        df['spot'].ffill(inplace=True)
+        dct_option_df[k] = df.dropna()
+    return dct_option_df
+
+
+def join_quotes(trades: Dict[OptionContract, pd.DataFrame], quotes: Dict[OptionContract, pd.DataFrame], col_join=('bid_close', 'ask_close')):
+    for k, df in trades.items():
+        df_quote = quotes.get(k)
+        if df_quote is None:
+            continue
+        df.index.name = 'ts'
+        df = df.merge(df_quote[list(col_join)], how='outer', right_index=True, left_index=True).sort_index()
+        for c in col_join:
+            df[c].ffill(inplace=True)
+        trades[k] = df.dropna()
+    return trades
 
 
 def regression_report(df, x, y):
@@ -186,7 +227,7 @@ def plot_after_repair(T, F, K, C, iv, expiries, epsilon1, epsilon2, spread_bid, 
     n_quote = len(C)
     unq_Ts, idx_T = np.unique(T, return_index=True)
 
-    expiry_str = [c.isoformat() for c in expiries]
+    expiry_str = sorted(set([c.isoformat() for c in expiries]))
 
     fig = plt.figure(figsize=(12, 6))
 
@@ -262,15 +303,44 @@ def plot_raw_repaired_prices(expiry_str, unq_Ts, T1, K1, C1, epsilon1, epsilon2)
     plt.show()
 
 
-def repair_prices(df_q, calculation_date: date, n_repairs=1, plot=False, right='call'):
-    C = np1d_from_df(df_q, 'mid_close')
-    C_bid = np1d_from_df(df_q, 'bid_close')
-    C_ask = np1d_from_df(df_q, 'ask_close')
-    F = np1d_from_df(df_q, 'mid_price_underlying')
-    iv = np1d_from_df(df_q, 'mid_iv')
-    K = np1d_from_df(df_q, 'strike')
-    T = np1d_from_df(df_q, 'tenor')
-    Tdt = np1d_from_df(df_q, 'expiry')
+def pkl_nm(tickers: str, takes: List[int]) -> str:
+    sha256_hash = sha256()
+    obj_str = tickers + str(takes)
+    sha256_hash.update(obj_str.encode('utf-8'))
+    digest = sha256_hash.hexdigest()
+    return f'earnings_iv_drop_{digest}.pkl'
+
+
+def repair_prices(df_q, calculation_date: date, n_repairs=1, plot=False, right='call', net_yield=0, col_nm_map=None, solver='glpk'):
+    """
+    C+PV(K)=P+S
+    Put call parity: S + p = c + K / (1 + r)^T
+    p = c - S + K / (1 + r)^T
+    c = p + S - K / (1 + r)^T
+
+    solver: 'glpk' or 'ipopt' or 'cbc'
+    """
+    col_nm_map = col_nm_map or {}
+    col_nm_map = {**{'mid_close': 'mid_close', 'bid_close': 'bid_close', 'ask_close': 'ask_close', 'mid_iv': 'mid_iv', 'strike': 'strike', 'tenor': 'tenor', 'expiry': 'expiry'},
+                  **col_nm_map}
+
+    nm_mid_close = col_nm_map['mid_close']
+
+    C = np1d_from_df(df_q, nm_mid_close)
+    C_bid = np1d_from_df(df_q, col_nm_map['bid_close'])
+    C_ask = np1d_from_df(df_q, col_nm_map['ask_close'])
+    iv = np1d_from_df(df_q, col_nm_map['mid_iv'])
+    K = np1d_from_df(df_q, col_nm_map['strike']).astype(float)
+    T = np1d_from_df(df_q, col_nm_map['tenor'])
+    Tdt = np1d_from_df(df_q, col_nm_map['expiry'])
+    S = np1d_from_df(df_q, col_nm_map['mid_close_underlying'])
+    F = S * np.exp(net_yield * T)
+
+    if right == 'put':
+        # c = p + S - K / (1 + r)^T
+        C = C + S - K / (1 + net_yield)**T
+        C_bid = C_bid + S - K / (1 + net_yield)**T
+        C_ask = C_ask + S - K / (1 + net_yield)**T
 
     # print(T.shape)
     # print(K.shape)
@@ -285,7 +355,7 @@ def repair_prices(df_q, calculation_date: date, n_repairs=1, plot=False, right='
         ix_nna += list(np.argwhere(~np.isnan(arr)).flatten())
     ix_nna = list(sorted(set(ix_nna)))
     # print(len(ix_nna))
-    T, K, C, C_bid, C_ask, F, iv, Tdt = tuple([a[ix_nna] for a in [T, K, C, C_bid, C_ask, F, iv, Tdt]])
+    T, K, C, C_bid, C_ask, F, iv, Tdt, S = tuple([a[ix_nna] for a in [T, K, C, C_bid, C_ask, F, iv, Tdt, S]])
     # print(len(T))
 
     if plot:
@@ -297,7 +367,10 @@ def repair_prices(df_q, calculation_date: date, n_repairs=1, plot=False, right='
         # normalise strikes and prices
         normaliser = constraints.Normalise()
         normaliser.fit(T, K, C, F)
+        F1 = normaliser._F
         T1, K1, C1 = normaliser.transform(T, K, C)
+        S1 = S[normaliser._order_mask]
+        Tdt1 = Tdt[normaliser._order_mask]
 
         _, _, C1_bid = normaliser.transform(T, K, C_bid)
         _, _, C1_ask = normaliser.transform(T, K, C_ask)
@@ -305,7 +378,9 @@ def repair_prices(df_q, calculation_date: date, n_repairs=1, plot=False, right='
         mat_A, vec_b, _, _ = constraints.detect(T1, K1, C1, verbose=True)
 
         # repair arbitrage - l1-norm objective
-        eps1 = repair.l1(mat_A, vec_b, C1)
+        eps1 = repair.l1(mat_A, vec_b, C1, solver='glpk')
+        # eps1cbc = repair.l1(mat_A, vec_b, C1, solver='cbc')
+        # eps1ipopt = repair.l1(mat_A, vec_b, C1, solver='ipopt')
         if len(eps1) > 0:
             epsilon1 = eps1
 
@@ -314,10 +389,12 @@ def repair_prices(df_q, calculation_date: date, n_repairs=1, plot=False, right='
         spread_bid = C1 - C1_bid
         spread = [spread_ask, spread_bid]
 
-        eps2 = repair.l1ba(mat_A, vec_b, C1, spread=spread)
+        eps2 = repair.l1ba(mat_A, vec_b, C1, spread=spread, solver='glpk')
         if len(eps2) > 0:
             epsilon2 = eps2
 
+        if epsilon1 is None:
+            epsilon1 = 0
         K, C = normaliser.inverse_transform(K1, C1 + epsilon1)
         print('-' * 10)
 
@@ -332,15 +409,20 @@ def repair_prices(df_q, calculation_date: date, n_repairs=1, plot=False, right='
     _, C2_bid = normaliser.inverse_transform(K1, C1_bid + epsilon1)
     _, C2_ask = normaliser.inverse_transform(K1, C1_ask + epsilon1)
 
-    iv2 = [calc_iv_for_repair(C2[i], F[i], calculation_date, right, calculation_date + timedelta(days=T[i] * 365), (K1 * F)[i]) for i in
-           range(len(C2))]
-    if plot:
-        plot_after_repair(T1, F, K2, C2, iv2, Tdt, epsilon1, epsilon2, spread_bid, spread_ask, C2_bid, C2_ask)
+    if right == 'put':
+        # p = c - S + K / (1 + r)^T
+        strike = K1 * F1
+        C2 = C2 - S1 + strike / (1 + net_yield) ** T1
+        C2_bid = C2_bid - S1 + strike / (1 + net_yield) ** T1
+        C2_ask = C2_ask - S1 + strike / (1 + net_yield) ** T1
+
+    iv2 = [calc_iv_for_repair(C2[i], S1[i], calculation_date, right, calculation_date + timedelta(days=T[i] * 365), (K1[i]*F1[i])) for i in range(len(C2))]
 
     if plot:
-        plot_prices_iv_repair(T, F, K2, C2, iv2)
+        plot_after_repair(T1, F1, K2, C2, iv2, Tdt1, epsilon1, epsilon2, spread_bid, spread_ask, C2_bid, C2_ask)
+        plot_prices_iv_repair(T1, F1, K2, C2, iv2)
 
-    df = pd.DataFrame([C2, K2, T, iv2, C2_bid, C2_ask, Tdt], index=['mid_close', 'strike', 'tenor', 'mid_iv', 'bid_close', 'ask_close', 'expiry']).transpose()
+    df = pd.DataFrame([C2, K2, T1, iv2, C2_bid, C2_ask, Tdt1, S1], index=[nm_mid_close, 'strike', 'tenor', 'mid_iv', 'bid_close', 'ask_close', 'expiry', 'spot']).transpose()
     df['mid_iv'] = df['mid_iv'].mask(df['mid_iv'] <= 0, np.nan)
     return df
 
@@ -384,24 +466,50 @@ def skew_measure2target_metric(skew_measure: SkewMeasure, right=None) -> Tuple[f
         raise ValueError(f'Unknown skew_measure: {skew_measure}')
 
 
-def enrich_atm_iv(df):
-    df['atm_iv'] = None
+def enrich_atm_iv_by_right(df, col_nm='atm_iv_by_right'):
+    df[col_nm] = None
     for expiry, s_df in df.groupby(level='expiry'):
         for right, ss_df in s_df.groupby(level='right'):
             for ts, sss_df in ss_df.groupby(level='ts'):
                 s = sss_df.iloc[0]['spot']
                 v_atm_iv = atm_iv(sss_df.loc[ts], expiry, s, right=right)
-                df.loc[sss_df.index, 'atm_iv'] = v_atm_iv
+                df.loc[sss_df.index, col_nm] = v_atm_iv
 
 
 @lru_cache(maxsize=2**10)
-def tenor(dt: date, calculation_dt: Union[date, ql.Date]) -> float:
+def get_tenor(dt: date, calculation_dt: Union[date, ql.Date]) -> float:
     if isinstance(dt, (datetime, date)):
         return (dt - calculation_dt).days / 365
     elif isinstance(dt, ql.Date):
         return (dt.to_date() - calculation_dt).days / 365
     else:
         raise Exception('Unsupported type')
+
+
+def get_moneyness(strike, spot) -> float:
+    return strike / spot
+
+
+def get_moneyness_fwd(equity: Equity, strike: float, spot: float, tenor: float) -> float:
+    """K/Se(r−δ)τ"""
+    rate = DiscountRateMarket
+    dividend_yield = get_dividend_yield(equity)
+    net_yield = rate - dividend_yield
+
+    strike_fwd = strike * np.exp(net_yield * tenor)
+    moneyness_fwd = strike_fwd / spot
+    return moneyness_fwd
+
+
+def get_moneyness_fwd_ln(equity: Equity, strike: float, spot: float, tenor: float) -> float:
+    """k = log(K/Se(r−δ)τ)"""
+    return np.log(get_moneyness_fwd(equity, strike, spot, tenor))
+
+
+def interpolate_pt(interp: NDInterpolatorBase, x: float, y: float) -> np.array:
+    _x = np.array([x]) if isinstance(x, (int, float)) else x
+    _y = np.array([y]) if isinstance(y, (int, float)) else y
+    return interp(_x, _y)
 
 
 def calc_iv_for_repair(price, priceUnderlying, start, option_right, maturityDate, strike):
@@ -432,7 +540,12 @@ def calc_iv_for_repair(price, priceUnderlying, start, option_right, maturityDate
     eu_option = ql.VanillaOption(payoff, eu_exercise)
     eu_option.setPricingEngine(binomial_engine)
     # print(eu_option.impliedVolatility(price, bsmProcess))
-    return eu_option.impliedVolatility(price, bsmProcess)
+    try:
+        return eu_option.impliedVolatility(price, bsmProcess)
+        #return eu_option.impliedVolatility(price, bsmProcess, 1.0e-4, 100, 1.0e-4, 4)
+    except RuntimeError as e:
+        print(e)
+        return np.nan
 
 
 # def implied_volatility(price, priceUnderlying, start, option_right, maturityDate, strike):
@@ -517,9 +630,11 @@ def historical_volatility(ps: pd.Series, window: pd.Timedelta = pd.Timedelta(day
     :param sampling_period_sec: The sampling period in seconds.
     :return: A series of historical volatilities.
     """
+    window = pd.Timedelta(days=10)
     ps_resampled = ps.resample(sampling_period, closed='right').last().ffill()
     ix_time = ps_resampled.index.time
     ps_resampled = ps_resampled.loc[ps_resampled.index[(ix_time >= time(9, 30)) & (ix_time <= time(16, 0))]]
+    # exclude holidays
     ps_std = ps_resampled.pct_change().rolling(window=window).std()
     ps_std.name = 'std'
     ps_annualize = ps_std.groupby(ps_std.index.date).count().apply(lambda x: np.sqrt(252 * x))
@@ -930,7 +1045,7 @@ def prepare_eu_option(strike, tenor, spot, put_call, vol, calculation_date, cale
     return eu_option
 
 
-def str2ql_option_right(right: str):
+def str2ql_option_right(right: str | OptionRight):
     return {
         'call': ql.Option.Call,
         'put': ql.Option.Put
@@ -985,6 +1100,11 @@ def intrinsic_value(strike, priceUnderlying, put_call):
         return max(strike - priceUnderlying, 0)
 
 
+def ps2intrinsic_value(ps: pd.Series, spot_column='spot') -> float:
+    ts, expiry, strike, right = unpack_mi_df_index(ps)
+    return intrinsic_value(float(strike), ps[spot_column], right)
+
+
 def npv(iv: float, strike: float, tenor, spot, put_call, calculation_date, calendar, day_count, rate, dividend) -> float:
     expiry = tenor2date(tenor, calculation_date)
     if calculation_date == expiry:
@@ -998,19 +1118,36 @@ def npv(iv: float, strike: float, tenor, spot, put_call, calculation_date, calen
 
 def implied_volatility(price: float, strike: float, tenor, spot, put_call, calculation_date, calendar, day_count, rate, dividend) -> float:
     expiry = tenor2date(tenor, calculation_date)
-    if expiry <= calculation_date:
+    if expiry < calculation_date:
         return 0
-    try:
-        yield_ts = ql.YieldTermStructureHandle(ql.FlatForward(to_ql_dt(calculation_date), rate, day_count))
-        dividend_ts = ql.YieldTermStructureHandle(ql.FlatForward(to_ql_dt(calculation_date), dividend, day_count))
+    if expiry == calculation_date:
+        # RuntimeError: option expired
+        # But, by the time it's exercised / assigned - option may still end up OTM/ITM. Therefore, would want an IV.
+        # THat's why setting calc date to expiry-1
+        calculation_date = calculation_date - timedelta(days=1)
 
-        calculation_date_ql = set_ql_calculation_date(calculation_date)
-        eu_option = prepare_eu_option(strike, tenor, spot, put_call, 0, calculation_date, calendar, day_count, yield_ts, dividend_ts)
-        spot_quote = ql.QuoteHandle(ql.SimpleQuote(spot))
-        vol_ts = ql.BlackVolTermStructureHandle(ql.BlackConstantVol(calculation_date_ql, calendar, ql.QuoteHandle(ql.SimpleQuote(0)), day_count))
-        yield_ts = ql.YieldTermStructureHandle(ql.FlatForward(calculation_date_ql, ql.QuoteHandle(ql.SimpleQuote(0)), day_count))
-        bsm_process = ql.BlackScholesMertonProcess(spot_quote, dividend_ts, yield_ts, vol_ts)
-        return eu_option.impliedVolatility(price, bsm_process)
+    yield_ts = ql.YieldTermStructureHandle(ql.FlatForward(to_ql_dt(calculation_date), rate, day_count))
+    dividend_ts = ql.YieldTermStructureHandle(ql.FlatForward(to_ql_dt(calculation_date), dividend, day_count))
+
+    calculation_date_ql = set_ql_calculation_date(calculation_date)
+    eu_option = prepare_eu_option(strike, tenor, spot, put_call, 0, calculation_date, calendar, day_count, yield_ts, dividend_ts)
+    spot_quote = ql.QuoteHandle(ql.SimpleQuote(spot))
+    vol_ts = ql.BlackVolTermStructureHandle(ql.BlackConstantVol(calculation_date_ql, calendar, ql.QuoteHandle(ql.SimpleQuote(0)), day_count))
+    yield_ts = ql.YieldTermStructureHandle(ql.FlatForward(calculation_date_ql, ql.QuoteHandle(ql.SimpleQuote(0)), day_count))
+    bsm_process = ql.BlackScholesMertonProcess(spot_quote, dividend_ts, yield_ts, vol_ts)
+    iv_val = get_iv(eu_option, price, bsm_process)
+    extrinsic_value = price - intrinsic_value(strike, spot, put_call)
+    if iv_val == 0 and extrinsic_value > 0:
+        # Dealing with very high volatilities or still zero if extrinsic value is close to zero.
+        iv_val = get_iv(eu_option, price, bsm_process, max_iterations=10000, max_vol=10)
+        if iv_val == 0 and extrinsic_value > spot * 0.01:
+            iv_val = 5
+    return iv_val
+
+
+def get_iv(eu_option, price, bsm_process, accuracy=0.0001, max_iterations=100, min_vol=1.0e-4, max_vol=4.0):
+    try:
+        return eu_option.impliedVolatility(price, bsm_process, accuracy, max_iterations, min_vol, max_vol)
     except RuntimeError as e:
         if 'root not bracketed' in str(e):
             return 0
@@ -1023,6 +1160,17 @@ def unpack_mi_df_index(ps: pd.Series) -> tuple:
     strike = ps.name[2]
     right = ps.name[3]
     return ts, expiry, strike, right
+
+
+def ps_index2option_contract(ps: pd.Series, equity: Equity) -> OptionContract:
+    if len(ps.name) == 3:
+        expiry, strike, right = ps.name
+    elif len(ps.name) == 4:
+        ts, expiry, strike, right = ps.name
+    else:
+        raise ValueError(f'Invalid index: {ps.name}')
+
+    return OptionContract('', equity.underlying_symbol, expiry, strike, right)
 
 
 def ps2delta(ps: pd.Series, iv_col: str, calendar, day_count, rate, dividend, spot_column='spot') -> float:
@@ -1070,7 +1218,7 @@ def year_quarter(dt: date) -> str:
     return f'{dt.strftime("%y")}Q{quarter}'
 
 
-def moneyness_iv(df, moneyness, expiry, fwd_s):
+def moneyness_iv(df, moneyness, expiry, fwd_s) -> np.ndarray:
     atmny_strike = fwd_s * moneyness
     strikes = pd.Series(np.unique(df.loc[(expiry, slice(None))].index.get_level_values('strike')))
     strikes_at_moneyness = strikes.iloc[(strikes.astype(float) / fwd_s - moneyness).abs().sort_values().head(2).index].values
@@ -1082,7 +1230,7 @@ def moneyness_iv(df, moneyness, expiry, fwd_s):
     return np.interp(atmny_strike, iv.index, iv.values)
 
 
-def atm_iv(df, expiry, s, right=None):
+def atm_iv(df, expiry, s, right=None) -> np.ndarray:
     if right:
         return moneyness_iv(df.loc[(expiry, slice(None), right), 'mid_iv'], 1, expiry, s)
     else:
@@ -1108,13 +1256,40 @@ def delta_mv_term(strike, tenor, rho, vv):
     return rho * bsm_vega * vv / (heston_iv * spotQuote.value())
 
 
-def earnings_download_dates(sym: str, take=-1, days_prior=7, days_after=3):
+def is_holiday(dt: date):
+    return dt.weekday() in (5, 6) or dt in get_market_hours_holidays()
+
+
+def earnings_download_dates(sym: str, take=-1, biz_days_prior=3, biz_days_after=2):
     try:
         release_date = EarningsPreSessionDates(sym)[take]
     except IndexError:
         raise ValueError(f'No earnings dates found for {sym}.')
-    start = release_date - timedelta(days=days_prior)
-    end = min(release_date + timedelta(days=days_after), date.today() - timedelta(days=1))
+    holidays = get_market_hours_holidays()
+    #[d.date() for d in cal.holidays(start=release_date - timedelta(days=30), end=release_date + timedelta(days=30)).to_pydatetime()]
+
+    start = None
+    end = None
+
+    prior_days = 0
+    for i in range(30):
+        dt = release_date - timedelta(days=i)
+        if dt not in holidays and dt.weekday() < 5:
+            prior_days += 1
+        if prior_days == biz_days_prior:
+            start = dt
+            break
+
+    after_days = 0
+    for i in range(1, 30):
+        dt = release_date + timedelta(days=i)
+        if dt not in holidays and dt.weekday() < 5:
+            after_days += 1
+        if after_days == biz_days_after:
+            end = dt
+            break
+
+    end = min(end, date.today() - timedelta(days=1))
     return start, end
 
 
@@ -1125,6 +1300,59 @@ def apply_ds_ret_weights(m_dnlv01, f_weight_ds, cfg):
     for k in range(n_ds):
         m_dnlv01[k, :] *= v_f_weight_ds[k]
     return m_dnlv01
+
+
+# def get_spread_modified_iv_caches(cache_iv0, cache_iv1, calcDate0: date, cfg):
+#     """
+#     These are too many configs and should be part of a dedicated model.
+#     The idea is that the higher the liquidity, the more spread I earn. Or differently, I won't get filled as mid IV for far expirations.
+#
+#     Liquidity is sharply increasing for the nearest expiration and week after, rest low, especially after tenor 0.5
+#     The assumptions about spread pct needs to be removed. Problem with using bid IV, often 0, creating a huge spread.
+#     The hard cut on tenor also to be replaced.
+#     """
+#     # # Pay spread for large tenor:
+#     cache_iv1_buy = defaultdict(dict)
+#     cache_iv1_sell = defaultdict(dict)
+#     cache_iv0_buy = defaultdict(dict)
+#     cache_iv0_sell = defaultdict(dict)
+#     for o, dct_ds_iv in cache_iv1.items():
+#         if isinstance(o, Equity):
+#             cache_iv1_sell[o] = {1: 0}
+#             cache_iv1_buy[o] = {1: 0}
+#             continue
+#         tenor = (o.expiry - calcDate0).days / 365
+#         if tenor > 0.5:
+#             # depends on buy / sell
+#             spread_pct_of_iv = 0.06
+#             # Assume I pay 50% of spread for long tenors.
+#             cache_iv1_buy[o] = {ds: cache_iv1[o][ds] * (1 + spread_pct_of_iv / 2) for ds in cfg.v_ds_ret}
+#             cache_iv1_sell[o] = {ds: cache_iv1[o][ds] * (1 - spread_pct_of_iv / 2) for ds in cfg.v_ds_ret}
+#         else:
+#             spread_pct_of_iv = 0.02
+#             # Assume I earn 50% of spread for short tenors.
+#             cache_iv1_buy[o] = {ds: cache_iv1[o][ds] * (1 - spread_pct_of_iv / 2) for ds in cfg.v_ds_ret}
+#             cache_iv1_sell[o] = {ds: cache_iv1[o][ds] * (1 + spread_pct_of_iv / 2) for ds in cfg.v_ds_ret}
+#
+#     for o, dct_ds_iv in cache_iv0.items():
+#         if isinstance(o, Equity):
+#             cache_iv0_sell[o] = {1: 0}
+#             cache_iv0_buy[o] = {1: 0}
+#             continue
+#         tenor = (o.expiry - calcDate0).days / 365
+#         if tenor > 0.5:
+#             # depends on buy / sell
+#             spread_pct_of_iv = 0.06
+#             # Assume I pay 50% of spread for long tenors.
+#             cache_iv0_buy[o] = {ds: cache_iv0[o][ds] * (1 + spread_pct_of_iv / 2) for ds in [1]}
+#             cache_iv0_sell[o] = {ds: cache_iv0[o][ds] * (1 - spread_pct_of_iv / 2) for ds in [1]}
+#         else:
+#             spread_pct_of_iv = 0.02
+#             # Assume I earn 50% of spread for short tenors.
+#             cache_iv0_buy[o] = {ds: cache_iv0[o][ds] * (1 - spread_pct_of_iv / 2) for ds in [1]}
+#             cache_iv0_sell[o] = {ds: cache_iv0[o][ds] * (1 + spread_pct_of_iv / 2) for ds in [1]}
+#
+#     return cache_iv0_buy, cache_iv0_sell, cache_iv1_buy, cache_iv1_sell
 
 
 def ps2mid_iv(ps: pd.Series) -> pd.Series:
@@ -1148,11 +1376,21 @@ class ATMHelper:
 def quotes2multi_index_df(quotes: Dict[OptionContract, pd.DataFrame]) -> pd.DataFrame:
     dfs = []
     for k, v in quotes.items():
+        if v.empty:
+            continue
         v['expiry'] = k.expiry
         v['strike'] = k.strike
         v['right'] = k.right
         dfs.append(v.reset_index().rename(columns={'index': 'ts'}).set_index(['ts', 'expiry', 'strike', 'right']))
     return pd.concat(dfs)
+
+
+def get_dividend_yield(equity: str | Equity, ts: datetime.date = None) -> float:
+    key = (equity if isinstance(equity, str) else equity.symbol).upper()
+    if key not in DividendYield:
+        traceback_str = ''.join(traceback.format_stack())
+        warning(f'No dividend yield for {key}. Defaulting to 0. {traceback_str}')
+    return DividendYield.get(key, 0)
 
 
 def df2atm_iv(df: pd.DataFrame, ps_spot, net_yield: float, min_dte=14) -> pd.Series:
@@ -1206,3 +1444,31 @@ def df2atm_iv(df: pd.DataFrame, ps_spot, net_yield: float, min_dte=14) -> pd.Ser
 
     return pd.Series(v_atm_iv, index=v_ts)
 
+
+@lru_cache(maxsize=1)
+def load_market_hours():
+    with open(Paths.path_market_hours_database, 'r') as f:
+        return json.load(f)
+
+
+@lru_cache(maxsize=1)
+def get_market_hours(market="Equity-usa-[*]"):
+    return load_market_hours()["entries"][market]
+
+
+@lru_cache(maxsize=1)
+def get_market_hours_holidays(market="Equity-usa-[*]") -> List[date]:
+    return [datetime.strptime(d, '%m/%d/%Y').date() for d in get_market_hours(market)["holidays"]]
+
+
+@lru_cache(maxsize=1)
+def get_market_hours_early_closes(market="Equity-usa-[*]") -> List[datetime]:
+    return [datetime.strptime(k + ' ' + v, '%m/%d/%Y %H:%M:%S') for k, v in get_market_hours(market)["earlyCloses"].items()]
+
+
+if __name__ == '__main__':
+    print(get_market_hours_holidays())
+    print(get_market_hours_early_closes())
+    sym, take = 'ON', -2
+    print(EarningsPreSessionDates(sym)[take])
+    print(earnings_download_dates(sym, take=take))

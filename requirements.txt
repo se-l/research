@@ -4,4 +4,4 @@ quantlib~=1.32
 pandas~=2.1.2
 scikit-learn~=1.3.2
 matplotlib~=3.8.2
-plotly~=5.18.0
+plotly~=5

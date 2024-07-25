@@ -50,6 +50,13 @@ def show(fig, fn: str = 'fig.html', rel_dir='figures', open_browser=True):
         webbrowser.open(path_fn)
 
 
+def plot_scatter(x, y, fn=None, marker_size=4):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=x, y=y, mode='markers', marker=dict(size=marker_size)))
+    fig.update_layout(title=fn, autosize=True)
+    show(fig, fn=fn)
+
+
 def load_plot_overall_volatility(sym, start, end, expiry=None, n=2):
     """Equal weights: One simple approach is to assign equal weights to each option contract. This approach is useful when all the options are considered equally important and there is no reason to favor any particular contract over another.
     Options prices: Another shared approach is to use the option prices as weights. The idea behind this approach is that the option prices reflect the market's assessment of the probability of the underlying asset moving to a certain level, and therefore the importance of each option contract. This approach is useful when the options have different strike prices or maturities, and the market prices reflect the relative importance of each contract.
@@ -220,17 +227,17 @@ yAnyxTime = dict(height=600, width=1000, margin=dict(l=0, r=0, t=0, b=0),
                  )
 
 
-def plot_ps_trace(*traces, show=True):
+def plot_ps_trace(*traces, show_p=True, fn=None, marker_size=3):
     fig = go.Figure()
     for trace in traces:
         if isinstance(trace, pd.Series):
             ps = trace
-            fig.add_trace(go.Scatter(x=ps.index, y=ps, mode='markers', marker=dict(size=3)))
+            fig.add_trace(go.Scatter(x=ps.index, y=ps, mode='markers', marker=dict(size=marker_size)))
         else:
             fig.add_trace(trace)
     fig.update_layout(**yAnyxTime)  # Update layout and show figure
-    if show:
-        fig.show()
+    if show_p:
+        show(fig, fn=fn)
     return fig
 
 

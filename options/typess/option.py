@@ -9,7 +9,8 @@ from typing import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 
-from shared.constants import DiscountRateMarket, DividendYield
+from options.helper import get_dividend_yield
+from shared.constants import DiscountRateMarket
 from options.ql_helper import engined_option
 from options.typess.enums import OptionPricingModel, OptionRight
 from options.typess.option_contract import OptionContract
@@ -31,7 +32,12 @@ class Greeks:
 
 
 class Option:
+    # Ideally refactored to combine with OptionContract
     multiplier = 100
+    accuracy = 1.0e-4
+    max_iterations = 100
+    minVol = 0.0001
+    maxVol = 4.0
 
     def __init__(self, optionContract: OptionContract, calculationDate: date = date.today(), price_underlying: float = 0, volatility: float = 0):
         self.optionContract = optionContract
@@ -62,12 +68,14 @@ class Option:
         self.riskFreeRateQuoteHandle = ql.QuoteHandle(self.riskFreeRateQuote)
 
         # Annualized Yields
-        self.dividendRateQuote = ql.SimpleQuote(DividendYield.get(optionContract.underlying_symbol.upper(), 0))
+        self.dividendRateQuote = ql.SimpleQuote(get_dividend_yield(optionContract.underlying_symbol))
         self.dividendRateQuoteHandle = ql.QuoteHandle(self.dividendRateQuote)
 
         self.am_option = engined_option(ql.VanillaOption(self.payoff, self.am_exercise), self.get_bsm(), optionPricingModel=OptionPricingModel.CoxRossRubinstein)
         self.eu_option = engined_option(ql.VanillaOption(self.payoff, self.eu_exercise), self.get_bsm(), optionPricingModel=OptionPricingModel.AnalyticEuropeanEngine)
 
+    @property
+    def symbol(self): return self.optionContract.symbol
     @property
     def underlying_symbol(self): return self.optionContract.underlying_symbol
 
@@ -97,21 +105,32 @@ class Option:
             self.calculationDateQl = _calculationDateQl
             self.calculationDate = date(_calculationDateQl.year(), _calculationDateQl.month(), _calculationDateQl.dayOfMonth())
 
-    @lru_cache(maxsize=2**12)
+    # @lru_cache(maxsize=2**12)
     def iv(self, priceOption: float, priceUnderlying: float, calculationDate: date) -> float:
         """
         Calculate implied volatility from a series of option prices.
         :param ps: A series of option prices.
         :return: A series of implied volatilities.
         """
+        if np.isnan(priceOption) or np.isnan(priceUnderlying):
+            raise ValueError('Price or underlying is NaN')
+
         _calculationDateQl = ql.Date(calculationDate.day, calculationDate.month, calculationDate.year) if calculationDate else self.calculationDateQl
         self.SetEvaluationDateToCalcDate(_calculationDateQl)
 
         if priceUnderlying != self.underlyingQuote.value():
             self.underlyingQuote.setValue(priceUnderlying)
 
+        iv_ = self._iv(priceOption, self.get_bsm(), self.maxVol)
+        if iv_ == 0 and priceOption > self.intrinsic_value():
+            iv_ = self._iv(priceOption, self.get_bsm(), 600)
+        return iv_
+
+    def _iv(self, priceOption, bsm, maxVol):
+        # impliedVolatility(VanillaOption self, Real targetValue, ext::shared_ptr< GeneralizedBlackScholesProcess > const & process, Real accuracy=1.0e-4, Size maxEvaluations=100, Volatility minVol=1.0e-4, Volatility maxVol=4.0) -> Volatility
+        # impliedVolatility(VanillaOption self, Real targetValue, ext::shared_ptr< GeneralizedBlackScholesProcess > const & process, DividendSchedule dividends, Real accuracy=1.0e-4, Size maxEvaluations=100, Volatility minVol=1.0e-4, Volatility maxVol=4.0) -> Volatility
         try:
-            return self.eu_option.impliedVolatility(priceOption, self.get_bsm())
+            return self.eu_option.impliedVolatility(priceOption, bsm, self.accuracy, self.max_iterations, self.minVol, maxVol)
         except Exception as e:
             if 'root not bracketed' not in str(e):
                 print(e)
@@ -172,6 +191,16 @@ class Option:
             self.volQuote.setValue(vol)
         return self.eu_option.delta()
 
+    @lru_cache(maxsize=2 ** 12)
+    def vega(self, vol, priceUnderlying, calculationDate):
+        # code duplication... fix later
+        self.SetEvaluationDateToCalcDate(calculationDate)
+        if priceUnderlying != self.underlyingQuote.value():
+            self.underlyingQuote.setValue(priceUnderlying)
+        if vol != self.volQuote.value():
+            self.volQuote.setValue(vol)
+        return self.eu_option.vega()
+
     def intrinsic_value(self, priceUnderlying: float = None):
         if priceUnderlying:
             self.underlyingQuote.setValue(priceUnderlying)
@@ -183,8 +212,8 @@ class Option:
     def is_otm(self, priceUnderlying: float):
         return self.intrinsic_value(priceUnderlying) == 0
 
-    def extrinsic_value(self):
-        return self.npv() - self.intrinsic_value()
+    def extrinsic_value(self, vol, priceUnderlying, calculationDate):
+        return self.npv(vol, priceUnderlying, calculationDate) - self.intrinsic_value(priceUnderlying)
 
     def summary(self):
         return {
@@ -214,10 +243,8 @@ if __name__ == '__main__':
     
     option.volQuote.setValue(0.411)
 
-
     # print(option.iv(0.8, 45, date(2023, 6, 5)))
     # option.underlyingQuote.setValue(17.49825)
-
 
     # print(f'Delta: {option.delta()}')
     # print(f'Theta: {option.theta()}')

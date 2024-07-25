@@ -1,3 +1,5 @@
+from typing import List
+
 import numpy as np
 import datetime
 import pandas as pd
@@ -7,6 +9,7 @@ from collections.abc import Mapping
 
 from options.helper import val_from_df, atm_iv
 from options.typess.equity import Equity
+from options.typess.holding import Holding
 
 
 class Portfolio(Mapping):
@@ -56,6 +59,9 @@ class Portfolio(Mapping):
             else:
                 price = val_from_df(df0, sec.expiry, sec.optionContract.strike, sec.right, 'mid_price')
                 print(f'{str(sec)},{q},{sec.iv(price, s, calc_date):.4f}')
+
+    def get_holdings(self) -> List[Holding]:
+        return [Holding(str(sec), q) for sec, q in self.holdings.items()]
 
     def keys(self):
         return self.holdings.keys()

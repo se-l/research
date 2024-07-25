@@ -7,14 +7,13 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from plotly.subplots import make_subplots
 
-from options.helper import year_quarter
+from options.helper import year_quarter, atm_iv
 from options.typess.equity import Equity
 from options.typess.enums import Resolution, OptionRight
 from options.typess.iv_surface import enrich_mean_regressed_skew_for_ds
 from options.typess.option_frame import OptionFrame
-from options.volatility.estimators.earnings_iv_drop_regressor import EarningsIVDropRegressor
+from options.volatility.estimators.earnings_iv_drop_poly_regressor import EarningsIVDropPolyRegressorV3
 from shared.constants import EarningsPreSessionDates
-from options.volatility.earnings_release import atm_iv
 from shared.paths import Paths
 from shared.plotting import show
 
@@ -79,7 +78,7 @@ def plot_horizontal_iv_curve_change(df0, df1, sym=None):
     # df0['mid_iv_estimated'] = df0['mid_iv'] - 0.02
 
     path_model = os.path.join(Paths.path_models, f'earnings_iv_drop_regressor_{date.today()}b.json')
-    model = EarningsIVDropRegressor().load_model(path_model)
+    model = EarningsIVDropPolyRegressorV3().load_model(path_model)
     d_iv_pct = model.predict(df0)
     df0['atm_iv_estimated'] = df0['atm_iv'] + df0['atm_iv'] * d_iv_pct
 

@@ -14,6 +14,7 @@ class OptionFrame:
     equity: Equity
     df_options: pd.DataFrame
     df_equity: pd.DataFrame
+    df_option_trades: pd.DataFrame
     start: datetime.date
     end: datetime.date
     resolution: Resolution
@@ -25,7 +26,7 @@ class OptionFrame:
         return self.fn(self.equity.symbol, self.resolution, self.seq_ret_threshold, self.version)
 
     def store(self):
-        with open(os.path.join(Paths.analytics, self.filename()), 'wb') as f:
+        with open(os.path.join(Paths.path_analysis_frames, self.filename()), 'wb') as f:
             pickle.dump(self, f)
 
     @staticmethod
@@ -34,6 +35,6 @@ class OptionFrame:
 
     @classmethod
     def load_frame(cls, equity: Equity, resolution: Resolution, seq_ret_threshold: float, v: str = '1'):
-        with open(os.path.join(Paths.analytics, cls.fn(equity.symbol.lower(), resolution, seq_ret_threshold, v)), 'rb') as f:
+        with open(os.path.join(Paths.path_analysis_frames, cls.fn(equity.symbol.lower(), resolution, seq_ret_threshold, v)), 'rb') as f:
             option_frame = pickle.load(f)
         return option_frame

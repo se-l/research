@@ -7,31 +7,36 @@ import psutil
 import pyomo.environ as pyo
 import signal
 
+from scipy.stats import t
 from multiprocessing import Process, Queue
 from typing import Dict, Tuple, List
 from pprint import pprint
 from pyomo.environ import ConcreteModel, SolverFactory, Constraint
+# from pyomo.util.infeasible import log_infeasible_constraints
 from datetime import timedelta
-
-from options.helper import year_quarter, enrich_atm_iv, val_from_df, apply_ds_ret_weights
+from options.helper import year_quarter, val_from_df, apply_ds_ret_weights
+from options.typess.earnings_config import EarningsConfig
 from options.typess.equity import Equity
+from options.typess.holding import Holding
 from options.typess.option import Option
 from options.typess.option_frame import OptionFrame
 from options.typess.portfolio import Portfolio
-from options.volatility.estimators.earnings_iv_drop_regressor import EarningsIVDropRegressor
-from shared.constants import EarningsPreSessionDates
+from options.volatility.estimators.earnings_iv_drop_poly_regressor import EarningsIVDropPolyRegressorV3
+from shared.constants import EarningsPreSessionDates, model_nm_earnings_iv_drop_regressor
 from shared.modules.logger import logger
 from shared.paths import Paths
 
 
 def derive_portfolio_milnp(
-        scoped_options, m_dnlv01, v_delta0, cfg,
-        n_contracts=20,
-        risk_adj_power=1,
-        weight_max_min_nlv=25,
+        scoped_options_str: List[str],
+        m_dnlv01_buy, m_dnlv01_sell,
+        cfg,
+        pdf_t_params=(5.167877640462322, 0.23684545664377854, 13.539506129642431),
+        weight_max_t_curve=5,
         f_weight_ds=None,
-        pf=None,
-        tee=True
+        holdings: List[Holding] = None,
+        tee=True,
+        weight_wing_lift: float = 0.0
 ) -> Tuple[Portfolio, ConcreteModel, ConcreteModel]:
     """
         Define an objective function   d NLV = -f(T, K, right)
@@ -58,108 +63,137 @@ def derive_portfolio_milnp(
 
         Perhaps can simplify by removing strike category: vector of possible (expiry, right) pairs. Value of variable is not quantity, delta [-1 -> 1] encoding strike and quantity
     """
-    if pf:
-        n_contracts = max(n_contracts, sum([abs(q) for q in pf.holdings.values()]))
-    n_options = len(scoped_options)
+    if holdings:
+        cfg.n_contracts = max(cfg.n_contracts, sum([abs(h.quantity) for h in holdings]))
+    n_options = len(scoped_options_str)
+    n_option_max = cfg.n_contracts // 5
 
     m = ConcreteModel()
 
     # Constants
+
+    # Constants T curve related
+    v_ds_pct = [100 * (x - 1) for x in cfg.v_ds_ret]
+    y = t.pdf(v_ds_pct, *pdf_t_params)
+    y_scaled = y / max(y)
+    i_ds_eq_0 = list(cfg.v_ds_ret).index(1)
+
+    # Constants position related
     ix_neg_ds = [i for i, v in enumerate(cfg.v_ds_ret) if v < 1]
     ix_pos_ds = [i for i, v in enumerate(cfg.v_ds_ret) if v > 1]
 
     # Parameters
-    m.scoped_options_str = [str(o) for o in scoped_options]
-    m.g_m_dnlv01 = m_dnlv01[:, :n_options]
-    m.g_m_dnlv01_ds_weighted = apply_ds_ret_weights(m.g_m_dnlv01, f_weight_ds, cfg)
-    g_v_delta0 = v_delta0[:n_options]
+    m.scoped_options_str = scoped_options_str
+    m.g_m_dnlv01_buy = m_dnlv01_buy[:, :n_options]
+    m.g_m_dnlv01_sell = m_dnlv01_sell[:, :n_options]
+    m.g_m_dnlv01_ds_weighted_buy = apply_ds_ret_weights(m.g_m_dnlv01_buy, f_weight_ds, cfg) if f_weight_ds else m.g_m_dnlv01_buy
+    m.g_m_dnlv01_ds_weighted_sell = apply_ds_ret_weights(m.g_m_dnlv01_sell, f_weight_ds, cfg) if f_weight_ds else m.g_m_dnlv01_sell
+    # g_v_delta0 = v_delta0[:n_options]
 
     # Variables
     m.set_var = pyo.Set(initialize=range(n_options))
+    m.set_var_ds = pyo.Set(initialize=range(len(cfg.v_ds_ret)))
 
-    m.v_var_p = pyo.Var(m.set_var, initialize=0, bounds=(0, n_contracts), domain=pyo.IntegerSet)
-    m.v_var_n = pyo.Var(m.set_var, initialize=0, bounds=(-n_contracts, 0), domain=pyo.IntegerSet)
+    m.v_var_p = pyo.Var(m.set_var, initialize=0, bounds=(0, cfg.n_contracts), domain=pyo.Integers)
+    m.v_var_n = pyo.Var(m.set_var, initialize=0, bounds=(-cfg.n_contracts, 0), domain=pyo.Integers)
     m.v_var_abs = [m.v_var_p[i] - m.v_var_n[i] for i in range(n_options)]
     m.v_var_net = [m.v_var_p[i] + m.v_var_n[i] for i in range(n_options)]
 
-    m.mn = pyo.Var(initialize=0)
-    m.var_lr_diff = pyo.Var(initialize=0, bounds=(0, None))
-    m.var_lr_diff_bin = pyo.Var(initialize=0, domain=pyo.Binary)
+    m.v_var_nlv_lt_t_curve = pyo.Var(m.set_var_ds, initialize=0, bounds=(None, 0))
+
+    m.var_max_t_curve = pyo.Var(initialize=0)
 
     # Intermediates
-    m.t = [m.v_var_net @ m.g_m_dnlv01_ds_weighted[i] for i in range(m.g_m_dnlv01_ds_weighted.shape[0])]
+    # Incorporate spread. _pos/buys, _neg/sells. Not getting filled at mid...
+    m.t = [m.v_var_p @ m.g_m_dnlv01_ds_weighted_buy[i] + m.v_var_n @ m.g_m_dnlv01_ds_weighted_sell[i] for i in range(m.g_m_dnlv01_ds_weighted_buy.shape[0])]
 
-    # They are ds weighted
-    m.neg_ds = sum([m.t[i] for i in ix_neg_ds])
-    m.pos_ds = sum([m.t[i] for i in ix_pos_ds])
-    m.lr_diff = m.neg_ds - m.pos_ds
-    m.lr_diff_sign = 2 * m.var_lr_diff_bin - 1
+    m.dnlv_where_ds_eq_0 = m.t[i_ds_eq_0]
+    m.y_desired_dnlv = y_scaled * m.dnlv_where_ds_eq_0
+    m.nlv_mn_t_curve = m.t - m.y_desired_dnlv
+    if weight_wing_lift:
+        logger.info(f'Lifting wings by {100*weight_wing_lift}% of t curve at 0 ds.')
+        m.nlv_mn_t_curve = m.nlv_mn_t_curve - m.t[i_ds_eq_0] * weight_wing_lift  # last term lifts the wings up. student t underestimates tails.
 
     # Constraints
-    m.c_max_abs_positions = Constraint(expr=sum([m.v_var_abs[i] for i in range(n_options)]) <= n_contracts)
 
-    m.cons_max_loss = pyo.ConstraintList()
-    for i in range(m.g_m_dnlv01_ds_weighted.shape[0]):
-        m.cons_max_loss.add(expr=m.mn <= m.t[i])
+    # Constraint on volume or total abs position
+    m.cons_quantity = pyo.ConstraintList()
+    m.c_max_abs_positions = Constraint(expr=sum([m.v_var_abs[i] for i in range(n_options)]) <= cfg.n_contracts)
+    for i in range(n_options):
+        m.cons_quantity.add(expr=m.v_var_abs[i] <= n_option_max)
 
-    m.cons_risk_balance = pyo.ConstraintList()
-    m.cons_risk_balance.add(expr=m.lr_diff * m.lr_diff_sign >= 1)
-    m.cons_risk_balance.add(expr=m.lr_diff * m.lr_diff_sign <= m.var_lr_diff)
+    # Want to maximize max t curve, therefore need to constrain max_t_curve not to be smaller
+    m.c_max_t_curve = Constraint(expr=m.dnlv_where_ds_eq_0 >= m.var_max_t_curve)
 
-    if pf:  # If any existing portfolio is provided, add constraints
+    # Shouldn't be modeled as hard constraint but rather var to optimize...
+    m.cons_t_curve = pyo.ConstraintList()
+    for i in range(len(m.y_desired_dnlv)):
+        m.cons_t_curve.add(expr=m.nlv_mn_t_curve[i] >= m.v_var_nlv_lt_t_curve[i])
+
+    # Upward sloping wings. Not up to optimization. A hard constraint
+    m.cons_wings = pyo.ConstraintList()
+    m.cons_wings.add(m.t[0] >= m.t[1])
+    m.cons_wings.add(m.t[-1] >= m.t[-2])
+
+    # Existing Portfolio
+    if holdings:  # If any existing portfolio is provided, add constraints
         m.cons_pf = pyo.ConstraintList()
-        assert sum([abs(q) for q in pf.holdings.values()]) <= n_contracts
-        for sec, q in pf.holdings.items():
+        assert sum([abs(h.quantity) for h in holdings]) <= cfg.n_contracts
+        for h in holdings:
+            q = h.quantity
             try:
-                print(m.scoped_options_str.index(str(sec)))
+                m.scoped_options_str.index(h.symbol)
             except ValueError:
-                raise ValueError(f'Option {sec} not in scoped options.')
-            i = m.scoped_options_str.index(str(sec))
-            if q < 0:
-                m.cons_pf.add(expr=(m.v_var_p[i] + m.v_var_n[i]) <= q)
-            elif q > 0:
-                m.cons_pf.add(expr=(m.v_var_p[i] + m.v_var_n[i]) >= q)
+                raise ValueError(f'Option {h.symbol} not in scoped options.')
+            i = m.scoped_options_str.index(h.symbol)
 
-    m.cons_exclude = pyo.ConstraintList()
+            # +1/-1 q to allow the algo to reduce abs position by 1 in order to adapt to changed spot prices primarily
+            x = 0
+            if q < 0:
+                m.cons_pf.add(expr=(m.v_var_p[i] + m.v_var_n[i]) <= q + x)
+            elif q > 0:
+                m.cons_pf.add(expr=(m.v_var_p[i] + m.v_var_n[i]) >= q - x)
 
     # Objectives.
-    # should make the weight dS dependent? and remove dS weighting from the input matrix?
-    # Requires a little more refactoring. Would slow down, means 1 more vector sum.
-    # Pass unweighted to this function, Weigh once for whoever needs it once. In report, contrast weighted and unweighted.
+    # from pyomo.contrib.preprocessing import deactivate_trivial_constraints
 
-    m.obj = pyo.Objective(expr=sum(m.t) + m.mn * weight_max_min_nlv - m.var_lr_diff, sense=pyo.maximize)
-
-    print(f'Solving for #Options: {n_options}, #Contracts: {n_contracts}')
+    m.obj = pyo.Objective(expr=m.var_max_t_curve * weight_max_t_curve + pyo.summation(m.v_var_nlv_lt_t_curve), sense=pyo.maximize)
+    # m.obj = pyo.Objective(expr=sum(m.t) + m.var_max_t_curve + pyo.summation(m.v_var_nlv_lt_t_curve), sense=pyo.maximize)
+    logger.info(f'Solving for #Options: {n_options}, #Contracts: {cfg.n_contracts}')
+    # log_infeasible_constraints(m, logger=logger, log_expression=True, log_variables=True)
     solver = SolverFactory('mindtpy')
-    obj_val_max = -np.inf
-
-    # Now keep on solving until all paths have been explored and performance is < 90% of best
-    # Need starting instance to create paths, then some recursive function to create new instances
-    # Each solver needs to run on its own core. Cannot pickle, not pyomo nor ql objects - would need to re-init whole matrix etc, then just past constraints....
-    # like the str name of an option... Would certainly speed up stuff. returns some performance metrics, like the pyomo json result.
-    # For a rester, each processes caches. Waiting 5 mins for solve to come back is too long to work on BTs...
-    # pre-calc or cache on disk
 
     inst = m.create_instance()
     # https://pyomo.readthedocs.io/en/stable/contributed_packages/mindtpy.html#mindtpy-implementation-and-optional-arguments
+    t0 = time.time()
+    models = {}
+
+    def cb_main_solve(m):
+        obj = pyo.value(m.obj)
+        models[m] = obj
+        logger.info(f'Main solve Obj Value: {obj}')
+
     res = solver.solve(inst,
+                       strategy='ECP',
                        nlp_solver='ipopt',
-                       # nlp_solver_args={'timelimit': 650, 'options': {'max_iter': 100}},
+                       nlp_solver_args={'timelimit': 200, 'options': {'max_iter': 100}},
                        # mip_solver='glpk',
                        mip_solver='cbc',
-                       mip_solver_args={'options': {'ratio': 0.005, 'sec': 100}},
-                       iteration_limit=10,
+                       mip_solver_args={'options': {'ratio': 0.005, 'sec': 200, 'threads': 8}},
+                       iteration_limit=3,
+                       time_limit=200,
                        tee=tee,
+                       call_after_main_solve=cb_main_solve,
                        )
+    logger.info(f'Solved in {time.time() - t0}s')
+    inst = max(models, key=models.get)
     # print(res)
-    obj_val = pyo.value(inst.obj)
-    obj_val_max = max(obj_val_max, obj_val)
     # inst.display()
 
-    report_model_instance(inst, m.scoped_options_str, n_options, m.g_m_dnlv01, g_v_delta0, cfg, ix_neg_ds, ix_pos_ds, risk_adj_power=risk_adj_power)
-    holdings = get_instance_holdings(inst, scoped_options)
+    report_model_instance(inst, m.scoped_options_str, n_options, m.g_m_dnlv01_buy, m.g_m_dnlv01_sell, cfg, ix_neg_ds, ix_pos_ds)
+    new_holdings_dct = get_instance_holdings(inst, scoped_options_str)
 
-    return Portfolio(holdings), m, inst
+    return Portfolio(new_holdings_dct), m, inst
 
 
 def task(num: int, inst: bytes, queue: Queue):
@@ -171,40 +205,51 @@ def task(num: int, inst: bytes, queue: Queue):
     queue.put((pid, pp_solve(inst)))
 
 
-def get_sub_portfolios(m: ConcreteModel, holdings: Dict[Option, int], scoped_options, min_obj_val: float = None) -> Tuple[List[Portfolio], List[ConcreteModel]]:
+def get_sub_portfolios(m: ConcreteModel, holdings: Dict[Option, int], scoped_options: List[str], min_obj_val: float = None) -> Tuple[List[Portfolio], List[ConcreteModel]]:
     """not yet recursive..."""
     t0 = time.time()
+
     # with multiprocessing.Pool(8) as pool:
     #     sub_instances = pool.map(pp_solve, )
 
     queue = Queue()
-    processes = []
+    # Add some dict here when process was started. If gt 5min, kill it.
+    processes_start_time = {}
+    # need to restrict max processes: it's blocking whole trading server...
     for i, b in enumerate(get_sub_problems(m, holdings, m.scoped_options_str)):
         p = Process(target=task, args=(i, b, queue))
         p.start()
-        processes.append(p)
+        processes_start_time[p] = time.time()
 
     sub_instances = []
-    while len(processes) > 0:
+    while len(processes_start_time) > 0:
         if queue.qsize() > 0:
             pid, res = queue.get()
             sub_instances.append(res)
             try:
                 proc = psutil.Process(pid)
                 proc.terminate()
-                logger.info(f'Terminated PID: {pid}')
+                logger.info(f'Terminated PID due to result in queue but p alive: {pid}')
             except psutil.NoSuchProcess:
                 pass
-            p = next(iter([p for p in processes if p.pid == pid]), None)
+            p = next(iter([p for p in processes_start_time.keys() if p.pid == pid]), None)
             if p and not p.is_alive():
                 p.join()
                 logger.info(f'Joined PID: {pid}')
-            processes = [p for p in processes if p.pid != pid]
-        for p in processes:
+            processes_start_time = {p: ts for p, ts in processes_start_time.items() if p.pid != pid}
+
+        remove_ps = []
+        for p, start_time in processes_start_time.items():
             if not p.is_alive():
                 p.join()
                 logger.info(f'Joined PID: {p.pid}')
-                processes.remove(p)
+                del processes_start_time[p]
+            elif time.time() - start_time > 200:
+                p.terminate()
+                logger.info(f'Terminated PID due to Timeout (200s): {p.pid}')
+                remove_ps.append(p)
+        for p in remove_ps:
+            del processes_start_time[p]
 
     # sub_instances = []
     # for b in get_sub_problems(m, holdings, m.scoped_options_str):
@@ -218,6 +263,7 @@ def get_sub_portfolios(m: ConcreteModel, holdings: Dict[Option, int], scoped_opt
     # Done in 3 min. With websockets, can explore recursively, adding more portfolios over time.
 
     portfolios = []
+    out_instances = []
     s_holdings = set()
     for s_inst in sub_instances:
         obj_val = pyo.value(s_inst.obj)
@@ -227,24 +273,35 @@ def get_sub_portfolios(m: ConcreteModel, holdings: Dict[Option, int], scoped_opt
             logger.info(f'Skipping. sub obj value too low: {pyo.value(s_inst.obj)}')
             continue
         portfolios.append(Portfolio(get_instance_holdings(s_inst, scoped_options)))
+        out_instances.append(s_inst)
 
         logger.info(get_instance_holdings(s_inst, scoped_options))
         s_holdings = s_holdings.union(set(get_instance_holdings(s_inst, scoped_options).keys()))
     logger.info(f'# Viable additional options: {len(s_holdings) - len(holdings)}')
-    return portfolios, sub_instances
+    return portfolios, out_instances
 
 
 def pp_solve(b) -> bytes | None:
     try:
         inst = cloudpickle.loads(b)
         solver = SolverFactory('mindtpy')
+        models = {}
+
+        def cb_main_solve(m):
+            obj = pyo.value(m.obj)
+            models[m] = obj
+            logger.info(f'Main solve Obj Value: {obj}')
         solver.solve(inst,
-                     nlp_solver='ipopt',  # nlp_solver_args={'timelimit': 650, 'options': {'max_iter': 100}},
+                     strategy='ECP',
+                     nlp_solver='ipopt',
+                     nlp_solver_args={'timelimit': 100, 'options': {'max_iter': 100}},
                      mip_solver='cbc',
-                     mip_solver_args={'options': {'ratio': 0.005, 'sec': 100}},
-                     iteration_limit=10,
-                     tee=True,
+                     mip_solver_args={'options': {'ratio': 0.01, 'sec': 100, 'threads': 8}},
+                     iteration_limit=3,
+                     tee=False,
+                     call_after_main_solve=cb_main_solve,
                      )
+        inst = max(models, key=models.get)
         return cloudpickle.dumps(inst)
     except Exception as e:
         logger.error(f'Error in pp_solve: {e}')
@@ -252,8 +309,13 @@ def pp_solve(b) -> bytes | None:
 
 
 def get_sub_problems(m, holdings, scoped_options_str: List[str]) -> bytes:
-    inst = m.create_instance()
     for o in holdings.keys():
+        try:
+            m.del_component('c4')
+        except Exception as e:
+            print(e)
+            pass
+        inst = m.create_instance()
         inst.c4 = Constraint(expr=inst.v_var_abs[scoped_options_str.index(str(o))] == 0)
         yield cloudpickle.dumps(inst)
 
@@ -266,31 +328,43 @@ def serialize_instance(inst):
     return inst
 
 
-def report_model_instance(inst, g_scoped_options, n_options, g_m_dnlv01, g_v_delta0, cfg, ix_neg_ds, ix_pos_ds, risk_adj_power=1):
+def get_obj_value_from_holdings():
+    """m.obj = pyo.Objective(expr=m.var_max_t_curve * weight_max_t_curve + pyo.summation(m.v_var_nlv_lt_t_curve), sense=pyo.maximize)"""
+
+
+def report_model_instance(inst, g_scoped_options, n_options, g_m_dnlv01_buy, g_m_dnlv01_sell, cfg, ix_neg_ds, ix_pos_ds):
+    vars_p = [inst.v_var_p[i].value for i in range(n_options)]
+    vars_n = [inst.v_var_n[i].value for i in range(n_options)]
     vars = [inst.v_var_p[i].value + inst.v_var_n[i].value for i in range(n_options)]
+    print(f'Weighted Objective: {pyo.value(inst.obj)}\n'
+          f'Sum of m.t / dNLV: {sum([pyo.value(inst.t[i]) for i in range(len(inst.t))])}\n'
+          f'NLV at ds 0%: {pyo.value(inst.dnlv_where_ds_eq_0)}, Variable: {inst.var_max_t_curve.value}\n'
+          f'desired curve diff sum: {sum([inst.v_var_nlv_lt_t_curve[i].value for i in range(len(inst.v_var_nlv_lt_t_curve))])}'
+    )
+    # print(f'y_scaled: {y_scaled}')
+    # print(f'm.y_desired_dnlv: {[pyo.value(v) for v in inst.y_desired_dnlv]}')
+    # print(f'desired curve: {[pyo.value(v) for v in inst.t]}\n\n')
+    # print(f'diff to curve: {[pyo.value(v) for v in inst.nlv_mn_t_curve]}\n\n')
+    # print(f'desired curve var: {[inst.v_var_nlv_lt_t_curve[i].value for i in range(len(inst.v_var_nlv_lt_t_curve))]}')
 
-    neg_ds = pyo.value(inst.neg_ds)
-    pos_ds = pyo.value(inst.pos_ds)
-    print(f'var_lr_diff: {pyo.value(inst.var_lr_diff)}; lr_diff: {pyo.value(inst.lr_diff)}; lr_diff_sign: {pyo.value(inst.lr_diff_sign)}; <1 ds: {neg_ds}; ds>1: {pos_ds}; n-p: {neg_ds-pos_ds}')
-
-    nlv_by_ds = np.sum(np.array(vars) * g_m_dnlv01, axis=1)
+    nlv_by_ds = np.sum(np.array(vars_p) * g_m_dnlv01_buy, axis=1) + np.sum(np.array(vars_n) * g_m_dnlv01_sell, axis=1)
     sol_dnlv_total = np.sum(nlv_by_ds)
     print(f'dNLV Total dS weighted: {sol_dnlv_total}')
 
     ls_diff = sum(nlv_by_ds[ix_neg_ds]) - sum(nlv_by_ds[ix_pos_ds])
-    print(f'LS Diff: {ls_diff}')
+    print(f'Weighted LS Diff: {ls_diff}')
 
-    dnlv_by_ds = np.sum(np.array(vars) * g_m_dnlv01, axis=1)
-    print(f'dLNLV by ds: \n{pd.Series(dnlv_by_ds, index=cfg.v_ds_ret)}')
+    dnlv_by_ds = np.sum(np.array(vars_p) * g_m_dnlv01_buy, axis=1) + np.sum(np.array(vars_n) * g_m_dnlv01_sell, axis=1)
+    print(f'Weighted dLNLV by ds: \n{pd.Series(dnlv_by_ds, index=cfg.v_ds_ret)}')
 
-    sol_delta_total = np.array(vars) @ g_v_delta0
-    print(f'Solution: Delta total: {sol_delta_total}, Weighted: {abs(sol_delta_total) ** risk_adj_power}')
+    # sol_delta_total = np.array(vars) @ g_v_delta0
+    # print(f'Solution: Delta total: {sol_delta_total}')
 
     holdings = {g_scoped_options[i]: v for i, v in enumerate(vars) if v != 0}
     pprint(holdings)
 
 
-def get_instance_holdings(inst, scoped_options: List[Option]) -> Dict[Option, float]:
+def get_instance_holdings(inst, scoped_options: List[str]) -> Dict[str, float]:
     vars = [inst.v_var_p[i].value + inst.v_var_n[i].value for i in range(len(inst.v_var_p))]
     holdings = {scoped_options[i]: v for i, v in enumerate(vars) if v != 0}
     return holdings
@@ -298,14 +372,12 @@ def get_instance_holdings(inst, scoped_options: List[Option]) -> Dict[Option, fl
 
 # Quick Local Testing
 def run():
-    from options.volatility.earnings_release import EarningsConfig, option_in_pf_scope, nlv, delta, get_f_weight_ds_ret, create_option_universe_iv_caches, \
-        initialize_portfolio, get_scoped_expiries
-    sym = 'PANW'
-    path_model = os.path.join(Paths.path_models, f'earnings_iv_drop_regressor_2024-03-20b.json')
-    earnings_iv_drop_regressor = EarningsIVDropRegressor().load_model(path_model)
+    sym = 'DELL'
+    path_model = os.path.join(Paths.path_models, model_nm_earnings_iv_drop_regressor)
+    earnings_iv_drop_regressor = EarningsIVDropPolyRegressorV3().load_model(path_model)
 
-    cfg = EarningsConfig(sym, take=-2, ranking_iterations=20, early_stopping=False, plot=True, plot_last=True, earnings_iv_drop_regressor=earnings_iv_drop_regressor,
-                         moneyness_limits=(0.7, 1.3), min_tenor=0.0, use_skew=False)
+    cfg = EarningsConfig(sym, take=-1, plot=True, plot_last=True, earnings_iv_drop_regressor=earnings_iv_drop_regressor,
+                         moneyness_limits=(0.6, 1.4), min_tenor=0.0)
     equity = Equity(sym)
     release_date = EarningsPreSessionDates(sym)[cfg.take]
 
@@ -321,32 +393,37 @@ def run():
     calcDate1 = release_date + timedelta(days=1)
     df0 = df.loc[[ts_pre_release]]
 
-    # Enrich ATM IV
-    enrich_atm_iv(df0)
-    d_iv_pct = cfg.earnings_iv_drop_regressor.predict(df0)
-    df0['d_iv_ts'] = df0['atm_iv'] * d_iv_pct
-
     s0 = df0.loc[ts_pre_release].iloc[0]['spot']
     print(f'''Spot0: {s0}; Spot1''')
 
-    option_universe, cache_iv0, cache_iv1 = create_option_universe_iv_caches(sym, ts_pre_release, df0, s0, cfg.v_ds_ret, cfg.use_skew)
+    option_universe, cache_iv0, cache_iv1 = create_option_universe_iv_caches(sym, ts_pre_release, df0, s0, cfg.v_ds_ret, cfg)
+    # cache_iv0_buy, cache_iv0_sell, cache_iv1_buy, cache_iv1_sell = get_spread_modified_iv_caches(cache_iv0, cache_iv1, calcDate0, cfg)
+    cache_iv0_buy, cache_iv0_sell, cache_iv1_buy, cache_iv1_sell = cache_iv0, cache_iv0, cache_iv1, cache_iv1
     expiries = list(sorted(set(df0.index.get_level_values('expiry').values)))
-    exp_jump1 = sorted([i for i in expiries if i >= release_date])[0]
 
-    pf = initialize_portfolio(df0, ts_pre_release, sym, exp_jump1, s0, cfg, option_universe)
+    pf = Portfolio()
 
     scoped_expiries = get_scoped_expiries(expiries)
     get_p0 = lambda o: val_from_df(df0.loc[ts_pre_release], o.expiry, o.optionContract.strike, o.right, 'mid_price')
-    scoped_options = [o for o in option_universe.values() if option_in_pf_scope(o, cfg.min_tenor, cfg.moneyness_limits, calcDate0, s0, get_p0(o), cfg.abs_delta_limits, scoped_expiries=scoped_expiries, pf=pf)]
+    scoped_options = [o for o in option_universe.values() if
+                      option_in_pf_scope(o, cfg, calcDate0, s0, get_p0(o), scoped_expiries=scoped_expiries, pf=pf)]
     print(f'Scoped options: #{len(scoped_options)} out of # {len(option_universe)}')
-    # scoped_options = descope_options(scoped_options, s0, cfg.max_scoped_options)
 
-    nlv0 = np.array([nlv(o, s0, cache_iv0[o][1], 1, calcDate0) for o in scoped_options])
+    # Deriving dNLV matrix
+    nlv0_buy = np.array([nlv(o, s0, cache_iv0_buy[o][1], 1, calcDate0) for o in scoped_options])
+    nlv0_sell = np.array([nlv(o, s0, cache_iv0_sell[o][1], 1, calcDate0) for o in scoped_options])
+    m_dnlv01_buy = np.array([[nlv(o, s0 * ds_ret, cache_iv1_sell[o][ds_ret], 1, calcDate1) for o in scoped_options] - nlv0_buy for ds_ret in cfg.v_ds_ret])
+    m_dnlv01_sell = np.array([[nlv(o, s0 * ds_ret, cache_iv1_buy[o][ds_ret], 1, calcDate1) for o in scoped_options] - nlv0_sell for ds_ret in cfg.v_ds_ret])
+
     v_delta0 = np.array([delta(o, s0, cache_iv0[o][1], 1, calcDate0) for o in scoped_options])
-    m_dnlv01 = np.array([[nlv(o, s0 * ds_ret, cache_iv1[o][ds_ret], 1, calcDate1) for o in scoped_options] - nlv0 for ds_ret in cfg.v_ds_ret])
     f_weight_ds = get_f_weight_ds_ret(0.1, plot=False)
 
-    pf_target, m, inst = derive_portfolio_milnp(scoped_options, m_dnlv01, v_delta0, cfg, f_weight_ds=f_weight_ds, pf=pf)
+    # Can earn spread for short term tenors, and around ATM up to tenor 0.5. Then better to assume I pay some spread. Could apply some weight here to m_dnlv01 reflecting this.
+    # Same weight would be applied to C# back tester...
+    # Basically, a transaction cost matrix. Based on cache_iv0/1 modifications... point is: incentivize short term stuff.
+
+    pf, _, inst = derive_portfolio_milnp([str(o) for o in scoped_options], m_dnlv01_buy, m_dnlv01_sell, cfg, f_weight_ds=f_weight_ds, holdings=pf.get_holdings())
+    # Plot worse and better scenario.
 
 
 if __name__ == '__main__':

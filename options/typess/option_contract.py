@@ -8,6 +8,7 @@ from options.typess.symbol import Symbol
 
 @dataclass
 class OptionContract(Symbol):
+    # Ideally refactored to combine with Option class
     symbol: str
     underlying_symbol: str
     expiry: datetime.date
@@ -48,8 +49,12 @@ class OptionContract(Symbol):
             return f'{self.underlying_symbol}_{tick_type}_{self.option_style}_{self.right}_{int(self.strike * 10000)}_{self.expiry.strftime("%Y%m%d")}.csv'.lower()
 
     def zip_name(self, tick_type: TickType, resolution: Resolution, date: datetime.date):
+        return self.get_zip_name(self.underlying_symbol, tick_type, resolution, date)
+
+    @staticmethod
+    def get_zip_name(underlying_symbol: str, tick_type: TickType, resolution: Resolution, date: datetime.date):
         if resolution in (Resolution.daily, Resolution.hour):
-            return f'{self.underlying_symbol}_{date.year}_{tick_type}_american.zip'.lower()
+            return f'{underlying_symbol}_{date.year}_{tick_type}_american.zip'.lower()
         else:
             return f'{date.strftime("%Y%m%d")}_{tick_type}_american.zip'.lower()
 
