@@ -37,7 +37,7 @@ def plot_iv_cones(implied_volatility, cones, confidence_levels):
 
 
 def show(fig, fn: str = 'fig.html', rel_dir='figures', open_browser=True):
-    if get_ipython() and get_ipython().config:
+    if open_browser and get_ipython() and get_ipython().config:
         fig.show()
         return
     path_dir = Path.joinpath(Path.cwd(), rel_dir)
@@ -239,6 +239,13 @@ def plot_ps_trace(*traces, show_p=True, fn=None, marker_size=3):
     if show_p:
         show(fig, fn=fn)
     return fig
+
+
+def plot_scatter_3d(x, y, z, fn=None, open_browser=True):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter3d(x=x, y=y, z=z, mode='markers', marker=dict(size=2)))
+    fig.update_layout(title=fn, autosize=True)
+    show(fig, fn=fn, open_browser=open_browser)
 
 
 def plot_iv(mat_df, contracts, expiry, rights=('',), strikes=('',)):  # Create three line graphs

@@ -1,7 +1,5 @@
 import json
 import traceback
-from hashlib import sha256
-
 import QuantLib as ql
 import pandas as pd
 import numpy as np
@@ -9,6 +7,7 @@ import arch
 import multiprocessing
 import matplotlib.pyplot as plt
 
+from hashlib import sha256
 from datetime import date, datetime, time, timedelta
 from collections import defaultdict
 from functools import reduce, lru_cache
@@ -167,25 +166,6 @@ def plot_surface(list_of_list, X, Y):
     Z = np.array(list_of_list)
     surf = ax.plot_surface(X, Y, Z, rstride=1, cstride=1, linewidth=0.1)
     fig.colorbar(surf, shrink=0.5, aspect=5)
-
-
-def generate_multi_paths_df(sequence, num_paths):
-    spot_paths = []
-    vol_paths = []
-
-    for i in range(num_paths):
-        sample_path = seq.next()
-        values = sample_path.value()
-
-        spot, vol = values
-
-        spot_paths.append([x for x in spot])
-        vol_paths.append([x for x in vol])
-
-    df_spot = pd.DataFrame(spot_paths, columns=[spot.time(x) for x in range(len(spot))])
-    df_vol = pd.DataFrame(vol_paths, columns=[spot.time(x) for x in range(len(spot))])
-
-    return df_spot, df_vol
 
 
 def np1d_from_df(df2, c):
@@ -478,7 +458,9 @@ def enrich_atm_iv_by_right(df, col_nm='atm_iv_by_right'):
 
 @lru_cache(maxsize=2**10)
 def get_tenor(dt: date, calculation_dt: Union[date, ql.Date]) -> float:
-    if isinstance(dt, (datetime, date)):
+    if isinstance(dt, pd.Timestamp):
+        return (dt.date() - calculation_dt).days / 365
+    elif isinstance(dt, (datetime, date)):
         return (dt - calculation_dt).days / 365
     elif isinstance(dt, ql.Date):
         return (dt.to_date() - calculation_dt).days / 365
@@ -752,79 +734,6 @@ def grid_search_garch_params():
     # Print the best BIC and best parameters
     print(f'Best BIC: {best_bic:.2f}')
     print(f'Best parameters: p={best_params[0]}, q={best_params[1]}, o={best_params[2]}')
-
-
-def exportAtmIVBySym(syms=["HPE", "IPG", "AKAM", "AOS", "MO", "FL", "AES", "LNT", "A", "ALL", "ARE", "ZBRA", "APD", "ALLE", "ZTS", "ZBH", "PFE"]):
-    atmIVsBySym = defaultdict(dict)
-    # syms = ["PFE"]
-    for sym in syms:
-        _sym = sym.lower()
-        try:
-            trades, quotes, contracts = load(_sym, start, end, n=1)
-            for expiry, optionContracts in contracts.items():
-                atmIVsBySym[_sym][expiry] = atm_iv(trades, quotes, optionContracts, n=1)  # , resolution=None)
-        except Exception as e:
-            print(e)
-    return atmIVsBySym
-
-
-def exportAtmIVBySym2(start, end, n=1,
-                      syms=["HPE", "IPG", "AKAM", "AOS", "MO", "FL", "AES", "LNT", "A", "ALL", "ARE", "ZBRA", "APD", "ALLE", "ZTS", "ZBH", "PFE"]):
-    start = start
-    end = end
-    client = mClient.Client()
-    atmIVsBySym = defaultdict(dict)
-    for sym in syms:
-        _sym = sym.lower()
-
-        equity = Equity(sym.lower()) if isinstance(sym, str) else sym
-        contracts = client.central_volatility_contracts(equity, start, end, n=n)
-        ivs = client.history(list(chain(*contracts.values())), start, end, Resolution.second, TickType.iv_quote, SecurityType.option)
-
-        for expiry, optionContracts in contracts.items():  # run across all core
-            mat_df = {}
-            for contract in optionContracts:
-                if str(contract) not in ivs:
-                    print(f'no data for {contract}')
-                    continue
-                df = ivs[str(contract)]
-                df['mid_iv'] = (df['ask_iv'] + df['bid_iv']) / 2
-                mat_df[str(contract)] = df[~df['mid_iv'].isna()].sort_index()
-            if not mat_df:
-                continue
-            # Outlier removal
-            # confidence_level = 3
-            # lookback_period = timedelta(days=5)
-            # rolling_iv_mean = pd.Series(df['mid_iv']).rolling(window=lookback_period, min_periods=0).mean()
-            # rolling_iv_std = pd.Series(df['mid_iv']).rolling(window=lookback_period, min_periods=0).std()
-            # upper_bound = rolling_iv_mean + confidence_level * rolling_iv_std
-            # lower_bound = rolling_iv_mean - confidence_level * rolling_iv_std
-            # df = df[(df['mid_iv'] < upper_bound) & (df['mid_iv'] > lower_bound)]
-
-            df_strike_iv = pd.DataFrame({float(k.split('_')[3]) / 10_000: df['mid_iv'] for k, df in mat_df.items()})  # .fillna(method='ffill')
-            df_strike_iv = df_strike_iv.sort_index(axis=1)
-            df_strike_iv = df_strike_iv.fillna(method='ffill')  # hmmm...
-            df_strike_iv = df_strike_iv[~df_strike_iv.index.duplicated(keep='first')].sort_index()
-
-            ps_t = pd.concat(df['mid_price_underlying'] for df in mat_df.values()).dropna()
-            ps_t = ps_t[~ps_t.index.duplicated(keep='first')].sort_index()
-
-            strikes = np.array([float(el) for el in df_strike_iv.columns])
-            df_strike_distance = client.strike_to_atm_distance(ps_t, strikes)
-            intersect_index = df_strike_iv.index.intersection(df_strike_distance.index)
-
-            df_strike_iv = df_strike_iv.loc[intersect_index]
-            df_strike_distance = df_strike_distance.loc[intersect_index]
-            df_strike_distance = df_strike_distance.sort_index(axis=1)
-            assert df_strike_iv.shape == df_strike_distance.shape, 'require identical shapes. timeseries and strikes'
-            assert df_strike_distance.columns.to_list() == df_strike_iv.columns.to_list(), 'require identical strikes'
-            strike_levels = list(range(-n, n + 1))
-
-            df_atm_iv = df_strike_iv * ((df_strike_distance.isin(strike_levels)) * 1)
-            count_ivs = (df_atm_iv != 0).sum(axis=1)
-            ps = pd.Series(df_atm_iv.sum(axis=1) / count_ivs, index=df_strike_iv.index)
-            atmIVsBySym[_sym][expiry] = ps
-    return atmIVsBySym
 
 
 def aewma(vec: pd.Series | np.ndarray, alpha: float, gamma: float) -> np.ndarray:
@@ -1237,23 +1146,6 @@ def atm_iv(df, expiry, s, right=None) -> np.ndarray:
         call_iv = moneyness_iv(df.loc[(expiry, slice(None), 'call'), 'mid_iv'], 1, expiry, s)
         put_iv = moneyness_iv(df.loc[(expiry, slice(None), 'put'), 'mid_iv'], 1, expiry, s)
         return (call_iv + put_iv) / 2
-
-
-def delta_heston(strike, tenor, engine):
-    eu_option = make_eu_option(ql.Option.Call, strike, start + timedelta(days=int(tenor * 365)))
-    eu_option.setPricingEngine(engine)
-    return eu_option.delta()
-
-
-def delta_mv_term(strike, tenor, rho, vv):
-    eu_option = make_eu_option(ql.Option.Call, strike, start + timedelta(days=int(tenor * 365)))
-    bsmProcess = ql.BlackScholesMertonProcess(spotQuote, dividend_ts, yield_ts, flat_vol_ts)
-    analytical_engine = ql.AnalyticEuropeanEngine(bsmProcess)
-    eu_option.setPricingEngine(analytical_engine)
-
-    heston_iv = heston_vol_surface.blackVol(tenor, strike)
-    bsm_vega = eu_option.vega()
-    return rho * bsm_vega * vv / (heston_iv * spotQuote.value())
 
 
 def is_holiday(dt: date):
