@@ -11,7 +11,7 @@ from hashlib import sha256
 from datetime import date, datetime, time, timedelta
 from collections import defaultdict
 from functools import reduce, lru_cache
-from typing import List, Union, Tuple, Dict
+from typing import List, Union, Tuple, Dict, Iterable
 from importlib import reload
 from itertools import chain
 from arbitragerepair import constraints, repair
@@ -466,6 +466,19 @@ def get_tenor(dt: date, calculation_dt: Union[date, ql.Date]) -> float:
         return (dt.to_date() - calculation_dt).days / 365
     else:
         raise Exception('Unsupported type')
+
+
+def timedelta2days(td: timedelta) -> int:
+    return td.days
+
+
+to_days = np.frompyfunc(timedelta2days, 1, 1)
+
+
+def get_v_tenor(dt: np.ndarray[date], calculation_dt: np.ndarray[Union[date, ql.Date]]) -> np.ndarray:
+    if dt is None or len(dt) == 0:
+        return np.array([])
+    return (to_days((dt - calculation_dt)) / 365).astype(float)
 
 
 def get_moneyness(strike, spot) -> float:
@@ -1042,7 +1055,7 @@ def implied_volatility(price: float, strike: float, tenor, spot, put_call, calcu
     eu_option = prepare_eu_option(strike, tenor, spot, put_call, 0, calculation_date, calendar, day_count, yield_ts, dividend_ts)
     spot_quote = ql.QuoteHandle(ql.SimpleQuote(spot))
     vol_ts = ql.BlackVolTermStructureHandle(ql.BlackConstantVol(calculation_date_ql, calendar, ql.QuoteHandle(ql.SimpleQuote(0)), day_count))
-    yield_ts = ql.YieldTermStructureHandle(ql.FlatForward(calculation_date_ql, ql.QuoteHandle(ql.SimpleQuote(0)), day_count))
+
     bsm_process = ql.BlackScholesMertonProcess(spot_quote, dividend_ts, yield_ts, vol_ts)
     iv_val = get_iv(eu_option, price, bsm_process)
     extrinsic_value = price - intrinsic_value(strike, spot, put_call)
