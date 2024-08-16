@@ -3,14 +3,23 @@ import datetime
 import json
 import json5
 
+from shared.modules.logger import error
 from shared.paths import Paths
 file_root = Paths.path_data
 
-with open(Paths.path_dividend_yields, 'r') as fh:
-    DividendYield = json5.load(fh)
+try:
+    with open(Paths.path_dividend_yields, 'r') as fh:
+        DividendYield = json5.load(fh)
+except Exception as e:
+    error("No DividendYield file found", e)
+    DividendYield = {}
 
-with open(Paths.path_earnings, 'r') as fh:
-    earnings_announcements = json.load(fh)
+try:
+    with open(Paths.path_earnings, 'r') as fh:
+        earnings_announcements = json.load(fh)
+except Exception as e:
+    error("No EarnningsAnnouncement file found", e)
+    earnings_announcements = []
 
 DiscountRateMarket = (DividendYield or {}).get('DiscountRateMarket', 0.0435)  # https://www.bloomberg.com/markets/rates-bonds/government-bonds/us
 
