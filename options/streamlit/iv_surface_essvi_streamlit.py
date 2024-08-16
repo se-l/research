@@ -31,10 +31,8 @@ def get_plot_smile(theta, rho, psi, tenor):
 
 
 if __name__ == '__main__':
-    """
-    C:\repos\research
-    streamlit run .\options\streamlit\iv_surface_essvi_streamlit.py
-    """
+    # C:\repos\research
+    # streamlit run .\options\streamlit\iv_surface_essvi_streamlit.py
 
     v_mny = np.arange(-0.3, 0.3, 0.01)
 
@@ -42,17 +40,45 @@ if __name__ == '__main__':
     st.markdown('''This is a simple example of a streamlit app to play with the SSVI model parameters. Inspired 
     by the paper "No arbitrage global parametrization for the eSSVI volatility surface" (2022) by Arianna Mingone, https://arxiv.org/abs/2204.00312''')
 
+    st.markdown(r'''
+    A slice of the surface's **total implied variance** is defined as:  
+    $
+    eSSVI(K, T) = \dfrac{1}{2} (\theta(T) + \rho(T)\psi(T)k + \sqrt{(\psi(T)k + \theta(T)\rho(T))^2 + \theta(T)^2(1-\rho(T)^2)})
+    $
+    
+    where the log-forward-moneyness $
+    k = log \dfrac{K}{F_0(T)}
+    $, with $K$ being the option strike and $F_0$(T) the forward.
+    
+    and the implied volatility can be recovered with  
+    $
+    \sigma_{imp}(K, T) = \sqrt{\dfrac{eSSVI(K,T)}{T}}
+    $
+    ''')
+
     col1, col2 = st.columns(2)
 
     with col1:
-        tenor = st.slider(r"###### tenor:", value=0.5, min_value=0.0, max_value=2.0, step=0.01)
         theta = st.slider(r"##### $\theta$:", value=0.05, min_value=0.0, max_value=None, step=0.01)
         rho = st.slider(r"##### $\rho$:", value=-0.05, min_value=-1.0, max_value=1.0, step=0.01)
         psi = st.slider(r"##### $\psi$:", value=0.3, min_value=-1.0, max_value=1.0, step=0.01)
+        tenor = st.slider(r"###### tenor:", value=0.5, min_value=0.0, max_value=2.0, step=0.01)
 
     with col2:
         smile = get_plot_smile(theta, rho, psi, tenor)
         st.plotly_chart(smile)
+
+    st.markdown('''
+    - θ is the At-The-Money (ATM) total implied variance. Has to be greater than 0.  
+      
+    I was hoping to understand $\\rho$ and $\\psi$ as skew and curvature, but swapping their signs produces a smile skewed in either direction. 
+    The paper defines them as follows:
+    - $\\rho$ is the correlation parameter, proportional to the slope of the smile at the ATM point.
+    - $\\psi$ is proportional to the ATM curvature.
+    
+    Given that all parameters are centered around the ATM point, it is probably important for fitting purposes to have that 
+    exactly on moneyness=0, which will depend on matching one's net yield (risk free rate - dividend for example) to the market.
+    ''')
 
     st.divider()
 
