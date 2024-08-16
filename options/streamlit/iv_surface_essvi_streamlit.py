@@ -1,12 +1,18 @@
+import os
 import sys
 
-from pathlib import Path
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objs as go
-sys.path.append(Path(__file__).parent)
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_dir = os.path.abspath(os.path.join(current_dir, '..', '..'))
+print(project_dir)
+sys.path.append(project_dir)
+
 from options.typess.iv_surface_essvi import f_essvi_iv
+
 
 st.set_page_config(
     page_title="SSVI model parameters",
