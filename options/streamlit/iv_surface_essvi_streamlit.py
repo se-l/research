@@ -1,7 +1,12 @@
+import sys
+
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objs as go
+sys.path.append(Path(__file__).parent)
+from options.typess.iv_surface_essvi import f_essvi_iv
 
 st.set_page_config(
     page_title="SSVI model parameters",
@@ -25,9 +30,6 @@ if __name__ == '__main__':
     C:\repos\research
     streamlit run .\options\streamlit\iv_surface_essvi_streamlit.py
     """
-    import sys, os
-    sys.path.append(os.getcwd() + '/options')
-    from options.typess.iv_surface_essvi import f_essvi_iv
 
     v_mny = np.arange(-0.3, 0.3, 0.01)
 

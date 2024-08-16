@@ -1,26 +1,22 @@
 from dataclasses import dataclass, fields
-from functools import reduce
 from itertools import chain
 
 import pandas as pd
 import numpy as np
 import plotly.graph_objs as go
 
-from datetime import date, timedelta, datetime
+from datetime import date, datetime
 from typing import Dict, List, Tuple, Callable, Iterable
 from plotly.subplots import make_subplots
 from statsmodels.tools.eval_measures import rmse
-
 from options.helper import get_tenor
-from options.typess.calibration_item import CalibrationItem, df2calibration_items
+from options.typess.calibration_item import CalibrationItem
 from options.typess.option import Option
-from shared.constants import EarningsPreSessionDates
-from options.typess.enums import Resolution, OptionRight
+from options.typess.enums import OptionRight
 from options.typess.equity import Equity
 from scipy.optimize import least_squares
-
 from shared.modules.logger import warning, info
-from shared.plotting import show, plot_scatter_3d
+from shared.plotting import show
 
 
 def f_essvi_total_variance(k, theta, rho, psi):
