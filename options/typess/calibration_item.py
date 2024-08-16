@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Iterable, List, Callable
 
 from options.helper import get_tenor
@@ -23,6 +23,7 @@ class CalibrationItem:
     dividend_yield: float
     weights: Iterable[float] = None
     vega: Iterable[float] = None
+    ts: Iterable[datetime] = None
 
     @property
     def tenor(self):
@@ -31,8 +32,9 @@ class CalibrationItem:
 
 def df2calibration_items(df_in: pd.DataFrame, calc_date: date, iv_col_nm, price_col_nm, spot_col_nm, rf, dividend_yield, weight_col_nm='vega_mid_price_iv', vega_col_nm=None) -> List[CalibrationItem]:
     """2) Refactor to include quotes, at least during plotting."""
+    df = df_in[df_in[price_col_nm].notna() & df_in[iv_col_nm].notna()]
     calibration_items = []
-    for right, s_df in df_in.groupby('right'):
+    for right, s_df in df.groupby('right'):
         for expiry, ss_df in s_df.groupby('expiry'):
             calibration_items.append(
                 CalibrationItem(
@@ -48,6 +50,7 @@ def df2calibration_items(df_in: pd.DataFrame, calc_date: date, iv_col_nm, price_
                     dividend_yield=dividend_yield,
                     weights=ss_df[weight_col_nm].values.astype(float),
                     vega=ss_df[vega_col_nm].values.astype(float) if vega_col_nm else None,
+                    ts=pd.to_datetime(ss_df.index.get_level_values('ts')),
                     # bid=ss_df['bid_close'].values if 'bid_close' in df_in.columns else None,
                     # ask=ss_df['ask_close'].values if 'ask_close' in df_in.columns else None,
                 ))

@@ -1,4 +1,7 @@
+import hashlib
 import json
+import os
+import pickle
 import traceback
 import QuantLib as ql
 import pandas as pd
@@ -1369,6 +1372,44 @@ def get_market_hours_holidays(market="Equity-usa-[*]") -> List[date]:
 @lru_cache(maxsize=1)
 def get_market_hours_early_closes(market="Equity-usa-[*]") -> List[datetime]:
     return [datetime.strptime(k + ' ' + v, '%m/%d/%Y %H:%M:%S') for k, v in get_market_hours(market)["earlyCloses"].items()]
+
+
+def get_pkl_cache_key(clear_prefix='', *args, **kwargs):
+    b = clear_prefix.encode()
+    try:
+        b += pickle.dumps(args)
+    except Exception:
+        b += str(args).encode()
+    try:
+        b += pickle.dumps(kwargs)
+    except Exception:
+        b += str(kwargs).encode()
+
+    digest = hashlib.md5(b).hexdigest()
+    fn = f'{clear_prefix}-{digest}.pkl'
+    for char in ['[', ']', ' ', ':', ',', "'", '(', ')', '{', '}']:
+        fn = fn.replace(char, '')
+    return fn
+
+
+def cache_to_disk(clear_prefix, root):
+    def cache_object(func):
+        def wrapper(*args, **kwargs):
+            fn = get_pkl_cache_key(clear_prefix, *args, **kwargs)
+
+            if os.path.exists(os.path.join(root, fn)):
+                with open(os.path.join(root, fn), 'rb') as f:
+                    obj = pickle.load(f)
+            else:
+                obj = func(*args, **kwargs)
+                with open(os.path.join(root, fn), 'wb') as f:
+                    pickle.dump(obj, f)
+
+            return obj
+
+        return wrapper
+
+    return cache_object
 
 
 if __name__ == '__main__':
