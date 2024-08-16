@@ -12,14 +12,12 @@ import matplotlib.pyplot as plt
 
 from hashlib import sha256
 from datetime import date, datetime, time, timedelta
-from collections import defaultdict
 from functools import reduce, lru_cache
-from typing import List, Union, Tuple, Dict, Iterable
+from typing import List, Union, Tuple, Dict
 from importlib import reload
 from itertools import chain
 from arbitragerepair import constraints, repair
 from matplotlib import gridspec
-from scipy.interpolate import LinearNDInterpolator
 from scipy.interpolate.interpnd import NDInterpolatorBase
 from scipy.signal import savgol_filter
 from sklearn.linear_model import LinearRegression
