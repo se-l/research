@@ -12,19 +12,11 @@ from multiprocessing import Process, Queue
 from typing import Dict, Tuple, List
 from pprint import pprint
 from pyomo.environ import ConcreteModel, SolverFactory, Constraint
-# from pyomo.util.infeasible import log_infeasible_constraints
-from datetime import timedelta
-from options.helper import year_quarter, val_from_df, apply_ds_ret_weights
-from options.typess.earnings_config import EarningsConfig
-from options.typess.equity import Equity
+from options.helper import apply_ds_ret_weights
 from options.typess.holding import Holding
 from options.typess.option import Option
-from options.typess.option_frame import OptionFrame
 from options.typess.portfolio import Portfolio
-from options.volatility.estimators.earnings_iv_drop_poly_regressor import EarningsIVDropPolyRegressorV3
-from shared.constants import EarningsPreSessionDates, model_nm_earnings_iv_drop_regressor
 from shared.modules.logger import logger
-from shared.paths import Paths
 
 
 def derive_portfolio_milnp(
@@ -370,64 +362,7 @@ def get_instance_holdings(inst, scoped_options: List[str]) -> Dict[str, float]:
     return holdings
 
 
-# Quick Local Testing
-def run():
-    sym = 'DELL'
-    path_model = os.path.join(Paths.path_models, model_nm_earnings_iv_drop_regressor)
-    earnings_iv_drop_regressor = EarningsIVDropPolyRegressorV3().load_model(path_model)
-
-    cfg = EarningsConfig(sym, take=-1, plot=True, plot_last=True, earnings_iv_drop_regressor=earnings_iv_drop_regressor,
-                         moneyness_limits=(0.6, 1.4), min_tenor=0.0)
-    equity = Equity(sym)
-    release_date = EarningsPreSessionDates(sym)[cfg.take]
-
-    option_frame = OptionFrame.load_frame(equity, cfg.resolution, cfg.seq_ret_threshold, year_quarter(release_date))
-    df = option_frame.df_options.sort_index()
-
-    ts = df.index.get_level_values('ts').unique()
-    v_ts_pre_release = [i for i in ts if i.date() <= release_date]  # preparing on day of expiry
-    v_ts_pre_release = [i for i in v_ts_pre_release if i.hour >= 10]
-
-    ts_pre_release = v_ts_pre_release[-2]
-    calcDate0 = ts_pre_release.date()
-    calcDate1 = release_date + timedelta(days=1)
-    df0 = df.loc[[ts_pre_release]]
-
-    s0 = df0.loc[ts_pre_release].iloc[0]['spot']
-    print(f'''Spot0: {s0}; Spot1''')
-
-    option_universe, cache_iv0, cache_iv1 = create_option_universe_iv_caches(sym, ts_pre_release, df0, s0, cfg.v_ds_ret, cfg)
-    # cache_iv0_buy, cache_iv0_sell, cache_iv1_buy, cache_iv1_sell = get_spread_modified_iv_caches(cache_iv0, cache_iv1, calcDate0, cfg)
-    cache_iv0_buy, cache_iv0_sell, cache_iv1_buy, cache_iv1_sell = cache_iv0, cache_iv0, cache_iv1, cache_iv1
-    expiries = list(sorted(set(df0.index.get_level_values('expiry').values)))
-
-    pf = Portfolio()
-
-    scoped_expiries = get_scoped_expiries(expiries)
-    get_p0 = lambda o: val_from_df(df0.loc[ts_pre_release], o.expiry, o.optionContract.strike, o.right, 'mid_price')
-    scoped_options = [o for o in option_universe.values() if
-                      option_in_pf_scope(o, cfg, calcDate0, s0, get_p0(o), scoped_expiries=scoped_expiries, pf=pf)]
-    print(f'Scoped options: #{len(scoped_options)} out of # {len(option_universe)}')
-
-    # Deriving dNLV matrix
-    nlv0_buy = np.array([nlv(o, s0, cache_iv0_buy[o][1], 1, calcDate0) for o in scoped_options])
-    nlv0_sell = np.array([nlv(o, s0, cache_iv0_sell[o][1], 1, calcDate0) for o in scoped_options])
-    m_dnlv01_buy = np.array([[nlv(o, s0 * ds_ret, cache_iv1_sell[o][ds_ret], 1, calcDate1) for o in scoped_options] - nlv0_buy for ds_ret in cfg.v_ds_ret])
-    m_dnlv01_sell = np.array([[nlv(o, s0 * ds_ret, cache_iv1_buy[o][ds_ret], 1, calcDate1) for o in scoped_options] - nlv0_sell for ds_ret in cfg.v_ds_ret])
-
-    v_delta0 = np.array([delta(o, s0, cache_iv0[o][1], 1, calcDate0) for o in scoped_options])
-    f_weight_ds = get_f_weight_ds_ret(0.1, plot=False)
-
-    # Can earn spread for short term tenors, and around ATM up to tenor 0.5. Then better to assume I pay some spread. Could apply some weight here to m_dnlv01 reflecting this.
-    # Same weight would be applied to C# back tester...
-    # Basically, a transaction cost matrix. Based on cache_iv0/1 modifications... point is: incentivize short term stuff.
-
-    pf, _, inst = derive_portfolio_milnp([str(o) for o in scoped_options], m_dnlv01_buy, m_dnlv01_sell, cfg, f_weight_ds=f_weight_ds, holdings=pf.get_holdings())
-    # Plot worse and better scenario.
-
-
 if __name__ == '__main__':
-    run()
     """
     Find all possible portfolios within 90% of the best option portfolio containing 20 options.
     Simplification: Don't vary the quantities of an option. Just iteratively kicking an option out, until objective goes < 90% of best.
