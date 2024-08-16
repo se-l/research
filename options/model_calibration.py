@@ -24,7 +24,7 @@ from options.helper import plot_vol_surface, repair_prices, str2ql_option_right,
 from options.typess.enums import TickType, SecurityType, Resolution
 from options.typess.equity import Equity
 from options.typess.option_contract import OptionContract
-from options.volatility.implied import Option
+from options.typess.option import Option
 
 warnings.filterwarnings('ignore')
 

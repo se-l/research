@@ -141,6 +141,10 @@ class Option:
                 print(e)
             return 0
 
+    def ivs(self, pricesOption: np.ndarray, pricesUnderlying: np.ndarray, dateTimes: Iterable[datetime]) -> Iterable[float]:
+        assert len(pricesOption) == len(pricesUnderlying) == len(dateTimes)
+        return (self.iv(priceOption, priceUnderlying, dt.date()) for priceOption, priceUnderlying, dt in zip(pricesOption, pricesUnderlying, dateTimes))
+
     def greeks(self, params: GreekParameters):
         self.underlyingQuote.setValue(params.price_underlying)
         self.volQuote.setValue(params.volatility)

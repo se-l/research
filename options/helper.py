@@ -25,13 +25,13 @@ from scipy.optimize import curve_fit
 from sklearn.metrics import r2_score
 
 import options.client as mClient
-import options.volatility.implied as mImplied
 from options.typess.enums import Resolution, TickType, SecurityType, GreeksEuOption, SkewMeasure, OptionRight
+from options.typess.option import Option
 from options.typess.option_contract import OptionContract
 from options.typess.equity import Equity
 from options.typess.option_frame import OptionFrame
 from shared.constants import EarningsPreSessionDates, DividendYield, DiscountRateMarket
-from shared.modules.logger import logger, info, error, warning
+from shared.modules.logger import logger, warning
 
 from shared.paths import Paths
 
@@ -115,7 +115,7 @@ def iv_of_expiry(optionContracts: List[OptionContract], trades, quotes, resoluti
         # Drop any null bid close or ask close
         df.dropna(subset=['bid_close', 'ask_close'], inplace=True)
         # assert df.isna().sum().sum() == 0
-        option = mImplied.Option(contract)
+        option = Option(contract)
         print(f'Calculating IV for {symbol}')
         print(f'DF len: {len(df)}, DF columns: {df.columns}')
         df['bid_iv'] = list(option.ivs(df['bid_close'], df['mid_close_underlying'], df.index))
@@ -1297,6 +1297,10 @@ def get_dividend_yield(equity: str | Equity, ts: datetime.date = None) -> float:
         traceback_str = ''.join(traceback.format_stack())
         warning(f'No dividend yield for {key}. Defaulting to 0. {traceback_str}')
     return DividendYield.get(key, 0)
+
+
+def spread_pc(moneyness, tenor):
+    return 1 / (abs(moneyness - 1) + 1) - (tenor / 2) ** 0.3
 
 
 def df2atm_iv(df: pd.DataFrame, ps_spot, net_yield: float, min_dte=14) -> pd.Series:
