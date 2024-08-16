@@ -463,9 +463,9 @@ def plot_ssvi_params_over_time(v_ivs: Iterable[IVSurface], fn=None, open_browser
         show(fig, fn=fn or f'essvi_{underlying}_params_params.html', open_browser=open_browser)
 
 
-# if __name__ == '__main__':
-#     # from connector.api_minlp.common import repair_quotes_keeping_holding_quotes
-#     import sys
+if __name__ == '__main__':
+    # from connector.api_minlp.common import repair_quotes_keeping_holding_quotes
+    import sys
 #     sys.path.append('C:/repos/trade/src')
 #     from derivatives.frame_builder import get_option_frame
 #     from connector.api_minlp.common import exclude_outlier_quotes

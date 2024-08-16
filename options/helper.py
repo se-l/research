@@ -26,7 +26,6 @@ from sklearn.metrics import r2_score
 
 import options.client as mClient
 from options.typess.enums import Resolution, TickType, SecurityType, GreeksEuOption, SkewMeasure, OptionRight
-from options.typess.option import Option
 from options.typess.option_contract import OptionContract
 from options.typess.equity import Equity
 from options.typess.option_frame import OptionFrame
@@ -90,6 +89,7 @@ def regression_report(df, x, y):
 
 
 def iv_of_expiry(optionContracts: List[OptionContract], trades, quotes, resolution='60min'):
+    from options.typess.option import Option
     mat_df = {}
     for contract in optionContracts:
         symbol = str(contract)
