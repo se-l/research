@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass, fields
 from itertools import chain
 
@@ -233,7 +234,7 @@ class IVSurface:
         v_weights = self.calibration_items[tenor_dt, right].weights
         y_pred = f_essvi_iv(v_mny_fwd_ln, *params, tenor=get_tenor(tenor_dt, calc_date))
 
-        fig = make_subplots(rows=3, cols=1, subplot_titles=[f'IV {self.underlying} {right} {tenor_dt}', 'Weights', 'Vega & Count Hist'])
+        fig = make_subplots(rows=3, cols=1, subplot_titles=[f'IV {self.underlying} {right} expiry: {tenor_dt}', 'Weights', 'Sample Count Hist'])
         fig.add_trace(go.Scatter(x=v_mny_fwd_ln, y=v_iv, mode='markers', marker=dict(size=4), name='iv'), row=1, col=1)
 
         # Quotes if any
@@ -246,8 +247,8 @@ class IVSurface:
 
         fig.add_trace(go.Scatter(x=v_mny_fwd_ln, y=y_pred, mode='markers', marker=dict(size=4), name='iv_pred'), row=1, col=1)
         fig.add_trace(go.Scatter(x=v_mny_fwd_ln, y=v_weights, mode='markers', marker=dict(size=4), name='weights'), row=2, col=1)
-        if v_vega is not None:
-            fig.add_trace(go.Scatter(x=v_mny_fwd_ln, y=v_vega, mode='markers', marker=dict(size=4), name='vega'), row=3, col=1)
+        # if v_vega is not None:
+        #     fig.add_trace(go.Scatter(x=v_mny_fwd_ln, y=v_vega, mode='markers', marker=dict(size=4), name='vega'), row=3, col=1)
         fig.add_trace(go.Histogram(x=v_mny_fwd_ln, nbinsx=int((max(v_mny_fwd_ln) - min(v_mny_fwd_ln)) * 100), name='count'), row=3, col=1)
         show(fig, fn=fn or f'essvi_{self.underlying}_{tenor_dt}_{right}.html', open_browser=open_browser)
 
@@ -270,7 +271,7 @@ class IVSurface:
         v_weights = item.weights
         y_pred = f_essvi_iv(v_mny_fwd_ln, *params, tenor=get_tenor(tenor_dt, calc_date))
 
-        fig = make_subplots(rows=3, cols=1, subplot_titles=[f'Prices {self.underlying} {right} {tenor_dt}', 'Weights', 'Vega & Count Hist'])
+        fig = make_subplots(rows=3, cols=1, subplot_titles=[f'Prices {self.underlying} {right} expiry: {tenor_dt}', 'Weights', 'Sample Count Hist'])
         f: Callable = Option.price_put if right == OptionRight.put else Option.price_call
         fig.add_trace(go.Scatter(x=v_mny_fwd_ln, y=item.price, mode='markers', marker=dict(size=4), name='price'), row=1, col=1)
 
@@ -286,8 +287,8 @@ class IVSurface:
         y_price_pred = np.array(f(v_spot, np.array(v_strike), tenor, y_pred, rf, dividend_yield))
         fig.add_trace(go.Scatter(x=v_mny_fwd_ln, y=y_price_pred, mode='markers', marker=dict(size=4), name='price_pred'), row=1, col=1)
         fig.add_trace(go.Scatter(x=v_mny_fwd_ln, y=v_weights, mode='markers', marker=dict(size=4), name='weights'), row=2, col=1)
-        if v_vega is not None:
-            fig.add_trace(go.Scatter(x=v_mny_fwd_ln, y=v_vega, mode='markers', marker=dict(size=4), name='vega'), row=3, col=1)
+        # if v_vega is not None:
+        #     fig.add_trace(go.Scatter(x=v_mny_fwd_ln, y=v_vega, mode='markers', marker=dict(size=4), name='vega'), row=3, col=1)
         fig.add_trace(go.Histogram(x=v_mny_fwd_ln, nbinsx=int((max(v_mny_fwd_ln) - min(v_mny_fwd_ln)) * 100), name='count'), row=3, col=1)
         show(fig, fn=fn or f'essvi_{self.underlying}_{tenor_dt}_{right}.html', open_browser=open_browser)
 
@@ -349,6 +350,7 @@ class IVSurface:
         return f_essvi_iv(moneyness_fwd_ln, *self.params[tenor, right], tenor=get_tenor(tenor, calc_date))
 
     def calibrate_surface_arb_free(self, right: str | OptionRight, samples: Dict[date, CalibrationItem], verbose=True):
+        t0 = time.time()
         tenors = sorted(samples.keys())
         n_tenors = len(tenors)
 
@@ -386,12 +388,13 @@ class IVSurface:
         #     warning(f'Calibration failed for {self.underlying} tenor={item.tenor_dt} {item.right} cost: {fit_res.cost}, calcDate={item.calculation_date}')
         #     self.plot_smile(item.tenor_dt, item.right, item.calculation_date)
 
-        info(f'Calibration done for {self.underlying} {right} total_rmse={sum(self.rmse.values())}')
+        info(f'Calibrated in {time.time() - t0:.2f}sec for {self.underlying} {right} total_rmse={sum(self.rmse.values())}')
         self.is_calibrated = True
 
         return self
 
     def calibrate_surface(self, right: str | OptionRight, samples: Dict[date, CalibrationItem], verbose=True):
+        t0 = time.time()
         if not samples:
             warning(f'No samples for {self.underlying} {right}')
             return self
@@ -399,9 +402,10 @@ class IVSurface:
         tenors = sorted(samples.keys())
         n_tenors = len(tenors)
 
-        # theta, rho, psi
+        # theta (ATM impl var), rho (ATM slope), psi (ATM curvature)
         calibration_params = [0.05, -0.3, 0.2] * n_tenors
 
+        info(f'Calibrating {self.underlying} {right}. # tenors: {n_tenors}. # samples: {len(samples)}. # params: {len(calibration_params)}')
         fit_res = least_squares(f_min_price_surface_theta_rho_psi, calibration_params, args=(samples, right), verbose=verbose, max_nfev=1000,
                                 bounds=([0, -np.inf, -np.inf] * n_tenors, [np.inf, np.inf, np.inf] * n_tenors)  # ensure theta > 0
                                 )
@@ -418,7 +422,7 @@ class IVSurface:
                 f_essvi_iv(item.mny_fwd_ln, theta, rho, psi, tenor=item.tenor)
             )
 
-        info(f'Calibration done for {self.underlying} {right} total_rmse={sum(self.rmse.values())}')
+        info(f'Calibrated in {time.time() - t0:.2f}sec for {self.underlying} {right} total_rmse={sum(self.rmse.values())}')
         self.is_calibrated = True
 
         return self
