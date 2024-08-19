@@ -27,6 +27,8 @@ def get_plot_smile(theta, rho, psi, tenor):
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=v_mny, y=v_iv, mode='markers', marker=dict(size=4), name='iv'))
     fig.update_layout(xaxis_title='moneyness ln(K/F)', yaxis_title='Implied Vol')
+    # set scale. y between 0 and 1
+    fig.update_yaxes(range=[0, 0.6])
     return fig
 
 
@@ -38,7 +40,9 @@ if __name__ == '__main__':
 
     st.title("Feeling SSVI's model parameters")
     st.markdown('''This is a simple example of a streamlit app to play with the SSVI model parameters. Inspired 
-    by the paper "No arbitrage global parametrization for the eSSVI volatility surface" (2022) by Arianna Mingone, https://arxiv.org/abs/2204.00312''')
+    by the paper "No arbitrage global parametrization for the eSSVI volatility surface" (2022) by Arianna Mingone, https://arxiv.org/abs/2204.00312.  
+    Each slice or tenor of the volatility surface is modeled by three parameters: $\\theta$, $\\rho$ and $\psi$. For N tenors, the entire surface is defined by N*3 parameters. 
+    ''')
 
     st.markdown(r'''
     A slice of the surface's **total implied variance** is defined as:  
@@ -60,8 +64,8 @@ if __name__ == '__main__':
 
     with col1:
         theta = st.slider(r"##### $\theta$:", value=0.05, min_value=0.0, max_value=None, step=0.01)
-        rho = st.slider(r"##### $\rho$:", value=-0.05, min_value=-1.0, max_value=1.0, step=0.01)
-        psi = st.slider(r"##### $\psi$:", value=0.3, min_value=-1.0, max_value=1.0, step=0.01)
+        rho = st.slider(r"##### $\rho$:", value=-0.3, min_value=-1.0, max_value=1.0, step=0.01)
+        psi = st.slider(r"##### $\psi$:", value=0.4, min_value=-1.0, max_value=1.0, step=0.01)
         tenor = st.slider(r"###### tenor:", value=0.5, min_value=0.0, max_value=2.0, step=0.01)
 
     with col2:
@@ -69,25 +73,30 @@ if __name__ == '__main__':
         st.plotly_chart(smile)
 
     st.markdown('''
+    The paper describes the parameters as follows:
     - θ is the At-The-Money (ATM) total implied variance. Has to be greater than 0.  
-      
-    I was hoping to understand $\\rho$ and $\\psi$ as skew and curvature, but swapping their signs produces a smile skewed in either direction. 
-    The paper defines them as follows:
     - $\\rho$ is the correlation parameter, proportional to the slope of the smile at the ATM point.
     - $\\psi$ is proportional to the ATM curvature.
     
-    Given that all parameters are centered around the ATM point, it is probably important for fitting purposes to have that 
-    exactly on moneyness=0, which will depend on matching one's net yield (risk free rate - dividend for example) to the market.
+    Setting $\\rho$ = 0 clearly moves the minimum of the curve to the ATM point.
+    Setting $\\psi$ = 0 clearly produces a straight line, no curvature, no smile.
+    
+    For price fitting, my initial $\\rho$ is usually negative and $\\psi$ positive to create a smirk. Better than having constants,
+    detect the direction of the skew and initialize $\\rho$ with reversed sign, positive.  
+    
+    Move the tenor, for larger values the slice moves down in parallel to the y-axis.
     ''')
 
     st.divider()
 
     st.markdown(r'''
-        SSVI parameters are defined for each tenor. For simplicity, let's scale above factors to generate a sensible surface.   
-        Not accurate. Fitting actual equity options surfacs results in my experience in a fairly linear theta(tenor), but not very linear rho and psi  (tenor).  
+        What the whole surface? For simplicity, let's scale above factors to generate a sensible surface.   
+        Fitting actual equity options surfacs results in my experience in a fairly linear theta(tenor), but not very linear rho and psi  (tenor).  
         $\theta$(tenor) = $\theta$ * $\theta$_a * tenor  
         $\rho$(tenor) = $\rho$ * $\rho$_a * tenor  
-        $\psi$(tenor) = $\psi$ * $\psi$_a * tenor. 
+        $\psi$(tenor) = $\psi$ * $\psi$_a * tenor.  
+        
+        Finding a set of parameters that generates and arbitrage free surface is describes in the paper and implemented the repository hosting this app.
         ''')
 
     col1, col2 = st.columns(2)
@@ -128,3 +137,7 @@ if __name__ == '__main__':
                       )
     fig.update_layout(width=1200, height=1200)
     st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown('''
+    App author: [Sebastian Lueneburg](https://sebastian-lueneuburg.com)
+    ''')
