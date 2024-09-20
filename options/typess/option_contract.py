@@ -2,25 +2,34 @@ import datetime
 
 from decimal import Decimal
 from dataclasses import dataclass
+from typing import Dict
+
 from options.typess.enums import OptionRight, OptionStyle, TickType, Resolution
-from options.typess.symbol import Symbol
+from options.typess.equity import Equity
+from options.typess.security import Security, SecurityDataSnap
+from options.typess.scenario import Scenario
+from shared.constants import dt_fmt_ymd
 
 
 @dataclass
-class OptionContract(Symbol):
-    # Ideally refactored to combine with Option class
-    symbol: str
-    underlying_symbol: str
-    expiry: datetime.date
-    strike: Decimal
-    right: str
-    issue_date: datetime.date = None
-    option_style: str = OptionStyle.american
-    multiplier: int = 100
+class OptionContract(Security):
+    # Ideally refactor to combine with Option class
+    def __init__(self, symbol: str, underlying_symbol: str, expiry: datetime.date, strike: Decimal, right: OptionRight | str, issue_date: datetime.date = None, option_style: str = OptionStyle.american, multiplier: int = 100, equity: Equity = None):
+        self.symbol = symbol.upper()
+        self._underlying_symbol = underlying_symbol.upper()
+        self.expiry = expiry
+        self.strike = strike
+        self.right = right
+        self.issue_date = issue_date
+        self.option_style = option_style
+        self.multiplier = multiplier
+        self.equity = equity
 
-    def __post_init__(self):
-        self.symbol = self.symbol.upper()
-        self.underlying_symbol = self.underlying_symbol.upper()
+        self.equity = Equity(self._underlying_symbol)
+
+    @property
+    def underlying_symbol(self):
+        return self.equity.symbol
 
     @classmethod
     def from_filename(cls, filename: str, issue_date=None):
@@ -42,21 +51,34 @@ class OptionContract(Symbol):
         strike = Decimal(strike) / 10000
         return cls(symbol, symbol, expiry, strike, option_right, issue_date)
 
-    def csv_name(self, tick_type: TickType, resolution: Resolution, date: datetime.date = None):
-        if resolution in (Resolution.minute, Resolution.second, Resolution.tick) and date:  # for minute, second, tick
-            return f'{date.strftime("%Y%m%d")}_{self.symbol}_{resolution}_{tick_type}_{self.option_style}_{self.right}_{int(self.strike * 10000)}_{self.expiry.strftime("%Y%m%d")}.csv'.lower()
+    def csv_name(self, tick_type: TickType, resolution: Resolution, dt: datetime.date = None):
+        if resolution in (Resolution.minute, Resolution.second, Resolution.tick) and dt:  # for minute, second, tick
+            return f'{dt.strftime(dt_fmt_ymd)}_{self.symbol}_{resolution}_{tick_type}_{self.option_style}_{self.right}_{int(self.strike * 10000)}_{self.expiry.strftime(dt_fmt_ymd)}.csv'.lower()
         else:
-            return f'{self.underlying_symbol}_{tick_type}_{self.option_style}_{self.right}_{int(self.strike * 10000)}_{self.expiry.strftime("%Y%m%d")}.csv'.lower()
+            return f'{self.underlying_symbol}_{tick_type}_{self.option_style}_{self.right}_{int(self.strike * 10000)}_{self.expiry.strftime(dt_fmt_ymd)}.csv'.lower()
 
-    def zip_name(self, tick_type: TickType, resolution: Resolution, date: datetime.date):
-        return self.get_zip_name(self.underlying_symbol, tick_type, resolution, date)
+    def zip_name(self, tick_type: TickType, resolution: Resolution, dt: datetime.date = None):
+        if dt is None:
+            raise ValueError('date must be provided')
+        return self.get_zip_name(self.underlying_symbol, tick_type, resolution, dt)
+
+    def nlv(self, market_data: Dict[str, SecurityDataSnap], q: float = 1, scenario=Scenario.mid):
+        if scenario == Scenario.mid:
+            price = (market_data[self.symbol].bid + market_data[self.symbol].ask) / 2
+        elif scenario == Scenario.best:
+            price = market_data[self.symbol].bid if q > 0 else market_data[self.symbol].ask
+        elif scenario == Scenario.worst:
+            price = market_data[self.symbol].ask if q > 0 else market_data[self.symbol].bid
+        else:
+            raise ValueError(f'Invalid scenario: {scenario}')
+        return price * q * self.multiplier
 
     @staticmethod
     def get_zip_name(underlying_symbol: str, tick_type: TickType, resolution: Resolution, date: datetime.date):
         if resolution in (Resolution.daily, Resolution.hour):
             return f'{underlying_symbol}_{date.year}_{tick_type}_american.zip'.lower()
         else:
-            return f'{date.strftime("%Y%m%d")}_{tick_type}_american.zip'.lower()
+            return f'{date.strftime(dt_fmt_ymd)}_{tick_type}_american.zip'.lower()
 
     def ib_symbol(self):
         # print('WARNING: strike may not be accurate')
@@ -73,70 +95,17 @@ class OptionContract(Symbol):
         right = OptionRight.from_string(ib_symbol.split(' ')[-1][6])
         # print('WARNING: strike may not be accurate')
         strike = Decimal(ib_symbol.split(' ')[-1][7:]) / 1000
-        return cls(underlying_symbol, underlying_symbol, expiry, strike, right)
+        return cls(ib_symbol, underlying_symbol, expiry, strike, right)
 
     def __repr__(self):
-        return f'{self.underlying_symbol}_{self.option_style}_{self.right}_{int(self.strike * 10000)}_{self.expiry.strftime("%Y%m%d")}'.lower()
+        return f'{self.underlying_symbol}_{self.option_style}_{self.right}_{int(self.strike * 10000)}_{self.expiry.strftime(dt_fmt_ymd)}'.lower()
+
+    def __eq__(self, other):
+        return self.__repr__() == other.__repr__()
 
     def __hash__(self):
         return hash(self.__repr__())
 
 
-def cleanup_low_res_files(symbol: Symbol):
-    """
-    1. Reading in all annual option quote files for a given symbol
-    2. Derive option contracts from name
-    3. For each set boundary of tradeable dates by whether by min max date with close bid or ask in daily quote files
-    4. Loop through all low min, sec, tick files and delete corresponding contract if not in tradeable dates
-    """
-    pass
-    # import os
-    # import pandas as pd
-    # from connector.quantconnect.typess.enums import TickType, Resolution
-    # from connector.quantconnect.typess.symbol import Symbol
-    #
-    # option_contracts = set()
-    # for filename in os.listdir('data/option/minute/ARE'):
-    #     option_contracts.add(OptionContract.from_filename(filename))
-    # for filename in os.listdir('data/option/second/ARE'):
-    #     option_contracts.add(OptionContract.from_filename(filename))
-    # for filename in os.listdir('data/option/tick/ARE'):
-    #     option_contracts.add(OptionContract.from_filename(filename))
-    # option_contracts = list(option_contracts)
-    # option_contracts.sort(key=lambda x: x.maturity_date)
-    # option_contracts.sort(key=lambda x: x.strike)
-    # option_contracts.sort(key=lambda x: x.right)
-    # option_contracts.sort(key=lambda x: x.option_style)
-    # option_contracts.sort(key=lambda x: x.symbol)
-    #
-    # # Get min max date for each contract
-    # for option_contract in option_contracts:
-    #     print(option_contract)
-    #     min_date = None
-    #     max_date = None
-    #     for filename in os.listdir(f'data/option/daily/{symbol.symbol}'):
-    #         if option_contract.symbol in filename:
-    #             df = pd.read_csv(f'data/option/daily/{symbol.symbol}/{filename}')
-    #             df['date'] = pd.to_datetime(df['date'])
-    #             df = df.set_index('date')
-    #             df = df.loc[df['close_ask'] > 0]
-    #             df = df.loc[df['close_bid'] > 0]
-    #             if min_date is None:
-    #                 min_date = df.index.min()
-    #                 max_date = df.index.max()
-    #             else:
-    #                 min_date = min(min_date, df.index.min())
-    #                 max_date = max(max_date, df.index.max())
-    #     print(min_date, max_date)
-    #
-    #     # Delete files not in tradeable dates
-    #     for filename in os.listdir(f'data/option/minute/{symbol.symbol}'):
-    #         if option_contract.symbol in filename:
-    #             date = datetime.datetime.strptime(filename.split('_')[0], '%Y%m%d').date()
-    #             if date < min_date or date > max_date:
-    #                 print(f'deleting {filename}')
-    #                 os.remove(f'data/option/minute/{symbol.symbol}/{filename}')
-
-
-if __name__ == '__main__':
-    OptionContract.from_filename('are_quote_american_put_1950000_20230721.csv')
+# if __name__ == '__main__':
+#     OptionContract.from_filename('are_quote_american_put_1950000_20230721.csv')

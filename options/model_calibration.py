@@ -178,7 +178,7 @@ def gen_df_q(quotes, ps_spot, calibration_params: CalibrationParams):
     df_quotes['expiry'] = [x.expiry for x in df_quotes.index]
     df_quotes['tenor'] = (df_quotes['expiry'] - calculation_ts.date()).apply(lambda x: x.days / 365)
     df_quotes['mid_price_underlying'] = spot
-    df_quotes['mid_iv'] = [Option(ix).iv(price, spot, calculation_ts.date()) for ix, price in
+    df_quotes['mid_iv'] = [Option(ix, calculation_ts.date()).iv(price, spot, calculation_ts.date()) for ix, price in
                            df_quotes['mid_close'].items()]
 
     df_quotes = df_quotes[(df_quotes['strike'] > min_strike) & (df_quotes['strike'] < max_strike)]

@@ -70,6 +70,10 @@ class SecurityType:
         else:
             raise ValueError(f'Unknown security type: {s}')
 
+    @classmethod
+    def infer_from_ib_symbol(cls, ib_symbol: str):
+        return cls.option if ' ' in ib_symbol else cls.equity
+
 
 class GreeksEuOption:
     delta: str = 'delta'

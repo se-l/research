@@ -9,8 +9,8 @@ from itertools import chain
 from datetime import timedelta, datetime, time, date
 from plotly.subplots import make_subplots
 from options.client import Client
-from options.helper import ps2iv, ps2delta, quotes2multi_index_df, aewma, get_dividend_yield
-from options.typess.enums import TickType, Resolution, SecurityType
+from options.helper import quotes2multi_index_df, aewma, get_dividend_yield, df2iv, get_v_tenor_from_index
+from options.typess.enums import TickType, Resolution, SecurityType, OptionRight
 from options.typess.equity import Equity
 from options.typess.option_contract import OptionContract
 from shared.constants import DiscountRateMarket, EarningsPreSessionDates
@@ -64,24 +64,33 @@ def load_data(start: date, end: date, equity: Equity, take: int, resolution: Res
 def enrich(equity: Equity, df: pd.DataFrame):
     # Deriving implied volatilities
     rate = DiscountRateMarket
-    dividend = get_dividend_yield(equity)
+    dividend_yield = dividend = get_dividend_yield(equity)
     calendar = ql.UnitedStates(ql.UnitedStates.NYSE)
     day_count = ql.Actual365Fixed()
-    df['bid_iv'] = df.apply(partial(ps2iv, price_col='bid_close', calendar=calendar, day_count=day_count, rate=rate, dividend=dividend), axis=1)
-    df['ask_iv'] = df.apply(partial(ps2iv, price_col='ask_close', calendar=calendar, day_count=day_count, rate=rate, dividend=dividend), axis=1)
-    df['fill_price_iv'] = df.apply(partial(ps2iv, price_col='fill_price', calendar=calendar, day_count=day_count, rate=rate, dividend=dividend), axis=1)
+    df['tenor'] = get_v_tenor_from_index(df)
+    df['bid_iv'] = df2iv(df, price_col_nm='bid_close', rate=rate, dividend_yield=dividend_yield)
+    df['ask_iv'] = df2iv(df, price_col_nm='ask_close', rate=rate, dividend_yield=dividend_yield)
+    df['fill_price_iv'] = df2iv(df, price_col_nm='fill_price', rate=rate, dividend_yield=dividend_yield)
+    # df['bid_iv'] = df.apply(partial(ps2iv, price_col='bid_close', calendar=calendar, day_count=day_count, rate=rate, dividend=dividend), axis=1)
+    # df['ask_iv'] = df.apply(partial(ps2iv, price_col='ask_close', calendar=calendar, day_count=day_count, rate=rate, dividend=dividend), axis=1)
+    # df['fill_price_iv'] = df.apply(partial(ps2iv, price_col='fill_price', calendar=calendar, day_count=day_count, rate=rate, dividend=dividend), axis=1)
 
     df['bid_iv_aewma'] = aewma(df['bid_iv'], 0.005, 0)  # no no. aewma follows delta/moneyness, not contracts
     df['ask_iv_aewma'] = aewma(df['ask_iv'], 0.005, 0)
 
-    df['bid_delta'] = df.apply(partial(ps2delta, iv_col='bid_iv', calendar=calendar, day_count=day_count, rate=rate, dividend=dividend), axis=1)
-    df['ask_delta'] = df.apply(partial(ps2delta, iv_col='ask_iv', calendar=calendar, day_count=day_count, rate=rate, dividend=dividend), axis=1)
+    df['bid_delta'] = None
+    df['ask_delta'] = None
+    for right, right_df in df.groupby(level='right'):
+        from options.typess.option import delta_call, delta_put
+        f = delta_call if right == OptionRight.call else delta_put
+        df.loc[right_df.index, 'bid_delta'] = f(right_df['spot'].values, right_df['strike_flt'].values, right_df['tenor'].values, right_df['bid_iv'].values, rate, dividend)
+        df.loc[right_df.index, 'ask_delta'] = f(right_df['spot'].values, right_df['strike_flt'].values, right_df['tenor'].values, right_df['ask_iv'].values, rate, dividend)
+    # df['bid_delta'] = df.apply(partial(ps2delta, iv_col='bid_iv', calendar=calendar, day_count=day_count, rate=rate, dividend=dividend), axis=1)
+    # df['ask_delta'] = df.apply(partial(ps2delta, iv_col='ask_iv', calendar=calendar, day_count=day_count, rate=rate, dividend=dividend), axis=1)
     df['mid_delta'] = (df['bid_delta'] + df['ask_delta']) / 2
 
     df['moneyness'] = df.index.get_level_values('strike').astype(float) / df['spot']
     df['option_contract_str'] = df['option_contract'].values.astype(str)
-    df['tenor'] = (df.index.get_level_values('expiry').to_series().reset_index(drop=True) - pd.Series(df.index.get_level_values('ts').to_pydatetime()).apply(
-        lambda x: x.date())).apply(lambda x: x.days / 365).values
     return df
 
 

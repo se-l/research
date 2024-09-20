@@ -310,7 +310,7 @@ def read_option_csvs_from_zip(file_full_path: Path, csvNmSymDts: List[CsvNmSymDt
 
             output[str(symbol)] = df
 
-    logger.info(f'Finished parsing {file_full_path}')
+    # logger.info(f'Finished parsing {file_full_path}')
     return output
 
 

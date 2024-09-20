@@ -1,5 +1,7 @@
 import os
 import time
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 import cloudpickle
@@ -9,27 +11,37 @@ import signal
 
 from scipy.stats import t
 from multiprocessing import Process, Queue
-from typing import Dict, Tuple, List
+from typing import Tuple, List
 from pprint import pprint
 from pyomo.environ import ConcreteModel, SolverFactory, Constraint
-from options.helper import apply_ds_ret_weights
-from options.typess.holding import Holding
+from options.helper import apply_ds_ret_weights, cache_to_disk
+from options.typess.earnings_config import EarningsConfig
 from options.typess.option import Option
 from options.typess.portfolio import Portfolio
-from shared.modules.logger import logger
+from shared.modules.logger import warning, info, error
+from shared.paths import Paths
 
 
+@dataclass
+class PfMilnpResult:
+    pf: Portfolio
+    pyo_model: ConcreteModel
+    pyo_inst: ConcreteModel
+
+
+@cache_to_disk('derive_portfolio_milnp', Paths.path_analysis_frames)
 def derive_portfolio_milnp(
-        scoped_options_str: List[str],
-        m_dnlv01_buy, m_dnlv01_sell,
-        cfg,
-        pdf_t_params=(5.167877640462322, 0.23684545664377854, 13.539506129642431),
+        scoped_options: List[Option],
+        m_dnlv01_buy: np.ndarray,
+        m_dnlv01_sell: np.ndarray,
+        cfg: EarningsConfig,
+        pdf_t_params=(3.5983921085778388, 0.370699060063924, 17.868437182218727),
         weight_max_t_curve=5,
         f_weight_ds=None,
-        holdings: List[Holding] = None,
+        pf: Portfolio = None,
         tee=True,
         weight_wing_lift: float = 0.0
-) -> Tuple[Portfolio, ConcreteModel, ConcreteModel]:
+) -> PfMilnpResult:
     """
         Define an objective function   d NLV = -f(T, K, right)
         Constraints: Right: 0/1 ; K: discrete, T: discrete
@@ -55,9 +67,9 @@ def derive_portfolio_milnp(
 
         Perhaps can simplify by removing strike category: vector of possible (expiry, right) pairs. Value of variable is not quantity, delta [-1 -> 1] encoding strike and quantity
     """
-    if holdings:
-        cfg.n_contracts = max(cfg.n_contracts, sum([abs(h.quantity) for h in holdings]))
-    n_options = len(scoped_options_str)
+    if pf:
+        cfg.n_contracts = max(cfg.n_contracts, sum([abs(h.quantity) for h in pf]))
+    n_options = len(scoped_options)
     n_option_max = cfg.n_contracts // 5
 
     m = ConcreteModel()
@@ -75,7 +87,7 @@ def derive_portfolio_milnp(
     ix_pos_ds = [i for i, v in enumerate(cfg.v_ds_ret) if v > 1]
 
     # Parameters
-    m.scoped_options_str = scoped_options_str
+    m.scoped_options = list(scoped_options)
     m.g_m_dnlv01_buy = m_dnlv01_buy[:, :n_options]
     m.g_m_dnlv01_sell = m_dnlv01_sell[:, :n_options]
     m.g_m_dnlv01_ds_weighted_buy = apply_ds_ret_weights(m.g_m_dnlv01_buy, f_weight_ds, cfg) if f_weight_ds else m.g_m_dnlv01_buy
@@ -103,7 +115,7 @@ def derive_portfolio_milnp(
     m.y_desired_dnlv = y_scaled * m.dnlv_where_ds_eq_0
     m.nlv_mn_t_curve = m.t - m.y_desired_dnlv
     if weight_wing_lift:
-        logger.info(f'Lifting wings by {100*weight_wing_lift}% of t curve at 0 ds.')
+        info(f'Lifting wings by {100*weight_wing_lift}% of t curve at 0 ds.')
         m.nlv_mn_t_curve = m.nlv_mn_t_curve - m.t[i_ds_eq_0] * weight_wing_lift  # last term lifts the wings up. student t underestimates tails.
 
     # Constraints
@@ -128,16 +140,16 @@ def derive_portfolio_milnp(
     m.cons_wings.add(m.t[-1] >= m.t[-2])
 
     # Existing Portfolio
-    if holdings:  # If any existing portfolio is provided, add constraints
+    if pf:  # If any existing portfolio is provided, add constraints
         m.cons_pf = pyo.ConstraintList()
-        assert sum([abs(h.quantity) for h in holdings]) <= cfg.n_contracts
-        for h in holdings:
+        assert sum([abs(h.quantity) for h in pf]) <= cfg.n_contracts
+        for h in pf:
             q = h.quantity
             try:
-                m.scoped_options_str.index(h.symbol)
+                m.scoped_options.index(h.symbol)
             except ValueError:
                 raise ValueError(f'Option {h.symbol} not in scoped options.')
-            i = m.scoped_options_str.index(h.symbol)
+            i = m.scoped_options.index(h.symbol)
 
             # +1/-1 q to allow the algo to reduce abs position by 1 in order to adapt to changed spot prices primarily
             x = 0
@@ -151,7 +163,7 @@ def derive_portfolio_milnp(
 
     m.obj = pyo.Objective(expr=m.var_max_t_curve * weight_max_t_curve + pyo.summation(m.v_var_nlv_lt_t_curve), sense=pyo.maximize)
     # m.obj = pyo.Objective(expr=sum(m.t) + m.var_max_t_curve + pyo.summation(m.v_var_nlv_lt_t_curve), sense=pyo.maximize)
-    logger.info(f'Solving for #Options: {n_options}, #Contracts: {cfg.n_contracts}')
+    info(f'Solving for #Options: {n_options}, #Contracts: {cfg.n_contracts}')
     # log_infeasible_constraints(m, logger=logger, log_expression=True, log_variables=True)
     solver = SolverFactory('mindtpy')
 
@@ -163,7 +175,7 @@ def derive_portfolio_milnp(
     def cb_main_solve(m):
         obj = pyo.value(m.obj)
         models[m] = obj
-        logger.info(f'Main solve Obj Value: {obj}')
+        info(f'Main solve Obj Value: {obj}')
 
     res = solver.solve(inst,
                        strategy='ECP',
@@ -177,15 +189,15 @@ def derive_portfolio_milnp(
                        tee=tee,
                        call_after_main_solve=cb_main_solve,
                        )
-    logger.info(f'Solved in {time.time() - t0}s')
+    info(f'Solved in {time.time() - t0}s')
     inst = max(models, key=models.get)
     # print(res)
     # inst.display()
 
-    report_model_instance(inst, m.scoped_options_str, n_options, m.g_m_dnlv01_buy, m.g_m_dnlv01_sell, cfg, ix_neg_ds, ix_pos_ds)
-    new_holdings_dct = get_instance_holdings(inst, scoped_options_str)
+    report_model_instance(inst, m.scoped_options, n_options, m.g_m_dnlv01_buy, m.g_m_dnlv01_sell, cfg, ix_neg_ds, ix_pos_ds)
+    pf = get_instance_holdings(inst, m.scoped_options)
 
-    return Portfolio(new_holdings_dct), m, inst
+    return PfMilnpResult(pf, m, inst)
 
 
 def task(num: int, inst: bytes, queue: Queue):
@@ -197,7 +209,7 @@ def task(num: int, inst: bytes, queue: Queue):
     queue.put((pid, pp_solve(inst)))
 
 
-def get_sub_portfolios(m: ConcreteModel, holdings: Dict[Option, int], scoped_options: List[str], min_obj_val: float = None) -> Tuple[List[Portfolio], List[ConcreteModel]]:
+def get_sub_portfolios(m: ConcreteModel, pf: Portfolio, scoped_options: List[Option], min_obj_val: float = None) -> Tuple[List[Portfolio], List[ConcreteModel]]:
     """not yet recursive..."""
     t0 = time.time()
 
@@ -208,7 +220,7 @@ def get_sub_portfolios(m: ConcreteModel, holdings: Dict[Option, int], scoped_opt
     # Add some dict here when process was started. If gt 5min, kill it.
     processes_start_time = {}
     # need to restrict max processes: it's blocking whole trading server...
-    for i, b in enumerate(get_sub_problems(m, holdings, m.scoped_options_str)):
+    for i, b in enumerate(get_sub_problems(m, pf, m.scoped_options)):
         p = Process(target=task, args=(i, b, queue))
         p.start()
         processes_start_time[p] = time.time()
@@ -221,37 +233,37 @@ def get_sub_portfolios(m: ConcreteModel, holdings: Dict[Option, int], scoped_opt
             try:
                 proc = psutil.Process(pid)
                 proc.terminate()
-                logger.info(f'Terminated PID due to result in queue but p alive: {pid}')
+                info(f'Terminated PID due to result in queue but p alive: {pid}')
             except psutil.NoSuchProcess:
                 pass
             p = next(iter([p for p in processes_start_time.keys() if p.pid == pid]), None)
             if p and not p.is_alive():
                 p.join()
-                logger.info(f'Joined PID: {pid}')
+                info(f'Joined PID: {pid}')
             processes_start_time = {p: ts for p, ts in processes_start_time.items() if p.pid != pid}
 
         remove_ps = []
         for p, start_time in processes_start_time.items():
             if not p.is_alive():
                 p.join()
-                logger.info(f'Joined PID: {p.pid}')
+                info(f'Joined PID: {p.pid}')
                 del processes_start_time[p]
             elif time.time() - start_time > 200:
                 p.terminate()
-                logger.info(f'Terminated PID due to Timeout (200s): {p.pid}')
+                info(f'Terminated PID due to Timeout (200s): {p.pid}')
                 remove_ps.append(p)
         for p in remove_ps:
             del processes_start_time[p]
 
     # sub_instances = []
-    # for b in get_sub_problems(m, holdings, m.scoped_options_str):
+    # for b in get_sub_problems(m, holdings, m.scoped_options):
     #     try:
     #         sub_instances.append(pp_solve(b))
     #     except Exception as e:
-    #         logger.error(f'Error in pp_solve: {e}')
+    #         error(f'Error in pp_solve: {e}')
 
     sub_instances = [cloudpickle.loads(b) for b in sub_instances if b]
-    logger.info(f'get_sub_portfolios: Done MP Time: {time.time() - t0}s')
+    info(f'get_sub_portfolios: Done MP Time: {time.time() - t0}s')
     # Done in 3 min. With websockets, can explore recursively, adding more portfolios over time.
 
     portfolios = []
@@ -260,16 +272,16 @@ def get_sub_portfolios(m: ConcreteModel, holdings: Dict[Option, int], scoped_opt
     for s_inst in sub_instances:
         obj_val = pyo.value(s_inst.obj)
         if min_obj_val:
-            logger.info(f'Sub obj: {pyo.value(s_inst.obj)}; % of min_obj_val: {100 * (pyo.value(s_inst.obj) / min_obj_val):.2f}%')
+            info(f'Sub obj: {pyo.value(s_inst.obj)}; % of min_obj_val: {100 * (pyo.value(s_inst.obj) / min_obj_val):.2f}%')
         if min_obj_val and obj_val < min_obj_val:
-            logger.info(f'Skipping. sub obj value too low: {pyo.value(s_inst.obj)}')
+            info(f'Skipping. sub obj value too low: {pyo.value(s_inst.obj)}')
             continue
-        portfolios.append(Portfolio(get_instance_holdings(s_inst, scoped_options)))
+        portfolios.append(get_instance_holdings(s_inst, scoped_options))
         out_instances.append(s_inst)
 
-        logger.info(get_instance_holdings(s_inst, scoped_options))
+        info(get_instance_holdings(s_inst, scoped_options))
         s_holdings = s_holdings.union(set(get_instance_holdings(s_inst, scoped_options).keys()))
-    logger.info(f'# Viable additional options: {len(s_holdings) - len(holdings)}')
+    info(f'# Viable additional options: {len(s_holdings) - len(pf)}')
     return portfolios, out_instances
 
 
@@ -282,7 +294,7 @@ def pp_solve(b) -> bytes | None:
         def cb_main_solve(m):
             obj = pyo.value(m.obj)
             models[m] = obj
-            logger.info(f'Main solve Obj Value: {obj}')
+            info(f'Main solve Obj Value: {obj}')
         solver.solve(inst,
                      strategy='ECP',
                      nlp_solver='ipopt',
@@ -296,19 +308,21 @@ def pp_solve(b) -> bytes | None:
         inst = max(models, key=models.get)
         return cloudpickle.dumps(inst)
     except Exception as e:
-        logger.error(f'Error in pp_solve: {e}')
+        error(f'Error in pp_solve: {e}')
         return None
 
 
-def get_sub_problems(m, holdings, scoped_options_str: List[str]) -> bytes:
-    for o in holdings.keys():
+def get_sub_problems(m: ConcreteModel, pf: Portfolio, scoped_options: List[Option]) -> bytes:
+    for sec in pf.holdings.keys():
+        if not isinstance(sec, Option):
+            continue
         try:
             m.del_component('c4')
         except Exception as e:
-            print(e)
+            warning(e)
             pass
         inst = m.create_instance()
-        inst.c4 = Constraint(expr=inst.v_var_abs[scoped_options_str.index(str(o))] == 0)
+        inst.c4 = Constraint(expr=inst.v_var_abs[scoped_options.index(sec)] == 0)
         yield cloudpickle.dumps(inst)
 
 
@@ -324,7 +338,7 @@ def get_obj_value_from_holdings():
     """m.obj = pyo.Objective(expr=m.var_max_t_curve * weight_max_t_curve + pyo.summation(m.v_var_nlv_lt_t_curve), sense=pyo.maximize)"""
 
 
-def report_model_instance(inst, g_scoped_options, n_options, g_m_dnlv01_buy, g_m_dnlv01_sell, cfg, ix_neg_ds, ix_pos_ds):
+def report_model_instance(inst, g_scoped_options: List[Option], n_options, g_m_dnlv01_buy, g_m_dnlv01_sell, cfg, ix_neg_ds, ix_pos_ds):
     vars_p = [inst.v_var_p[i].value for i in range(n_options)]
     vars_n = [inst.v_var_n[i].value for i in range(n_options)]
     vars = [inst.v_var_p[i].value + inst.v_var_n[i].value for i in range(n_options)]
@@ -356,10 +370,9 @@ def report_model_instance(inst, g_scoped_options, n_options, g_m_dnlv01_buy, g_m
     pprint(holdings)
 
 
-def get_instance_holdings(inst, scoped_options: List[str]) -> Dict[str, float]:
+def get_instance_holdings(inst, scoped_options: List[Option]) -> Portfolio:
     vars = [inst.v_var_p[i].value + inst.v_var_n[i].value for i in range(len(inst.v_var_p))]
-    holdings = {scoped_options[i]: v for i, v in enumerate(vars) if v != 0}
-    return holdings
+    return Portfolio({scoped_options[i]: v for i, v in enumerate(vars) if v != 0})
 
 
 if __name__ == '__main__':

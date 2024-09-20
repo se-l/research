@@ -26,6 +26,7 @@ class Paths:
     path_activity_reports_ytd = path_ib.joinpath('activityReportsYTD')
     path_analysis_frames = analytics.joinpath('analysis_frames')
     path_calibration = analytics.joinpath('calibration')
+    path_api_cache = analytics.joinpath('api_cache')
 
     path_earnings = path_symbol_properties.joinpath('EarningsAnnouncements.json')
     path_dividend_yields = path_symbol_properties.joinpath('DividendYields.json')

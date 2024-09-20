@@ -241,11 +241,12 @@ def plot_ps_trace(*traces, show_p=True, fn=None, marker_size=3):
     return fig
 
 
-def plot_scatter_3d(x, y, z, fn=None, open_browser=True):
+def plot_scatter_3d(x, y, z, fn=None, open_browser=True) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Scatter3d(x=x, y=y, z=z, mode='markers', marker=dict(size=2)))
     fig.update_layout(title=fn, autosize=True)
     show(fig, fn=fn, open_browser=open_browser)
+    return fig
 
 
 def plot_iv(mat_df, contracts, expiry, rights=('',), strikes=('',)):  # Create three line graphs

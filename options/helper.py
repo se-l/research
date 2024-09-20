@@ -1,12 +1,13 @@
 import hashlib
 import json
+import operator
 import os
 import pickle
 import traceback
+
 import QuantLib as ql
 import pandas as pd
 import numpy as np
-import arch
 import multiprocessing
 import matplotlib.pyplot as plt
 
@@ -16,6 +17,10 @@ from functools import reduce, lru_cache
 from typing import List, Union, Tuple, Dict
 from importlib import reload
 from itertools import chain
+
+import py_vollib.black_scholes_merton.implied_volatility
+import py_vollib_vectorized
+
 from arbitragerepair import constraints, repair
 from matplotlib import gridspec
 from scipy.interpolate.interpnd import NDInterpolatorBase
@@ -26,9 +31,12 @@ from sklearn.metrics import r2_score
 
 import options.client as mClient
 from options.typess.enums import Resolution, TickType, SecurityType, GreeksEuOption, SkewMeasure, OptionRight
+from options.typess.holding import Holding
 from options.typess.option_contract import OptionContract
 from options.typess.equity import Equity
 from options.typess.option_frame import OptionFrame
+from options.typess.portfolio import Portfolio
+from options.typess.security import Security
 from shared.constants import EarningsPreSessionDates, DividendYield, DiscountRateMarket
 from shared.modules.logger import logger, warning
 
@@ -435,7 +443,6 @@ def skew_measure2target_metric(skew_measure: SkewMeasure, right=None) -> Tuple[f
         return -0.25, -0.5
     elif skew_measure == SkewMeasure.Delta25Delta25:
         raise NotImplementedError
-        return 0.25, -0.25
     # elif skew_measure == SkewMeasure.M90M100:
     #     return 0.9, 1.0
     # elif skew_measure == SkewMeasure.M90M110:
@@ -460,11 +467,11 @@ def enrich_atm_iv_by_right(df, col_nm='atm_iv_by_right'):
 @lru_cache(maxsize=2**10)
 def get_tenor(dt: date, calculation_dt: Union[date, ql.Date]) -> float:
     if isinstance(dt, pd.Timestamp):
-        return (dt.date() - calculation_dt).days / 365
+        return ((dt.date() - calculation_dt).days + 1) / 365
     elif isinstance(dt, (datetime, date)):
-        return (dt - calculation_dt).days / 365
+        return ((dt - calculation_dt).days + 1) / 365
     elif isinstance(dt, ql.Date):
-        return (dt.to_date() - calculation_dt).days / 365
+        return ((dt.to_date() - calculation_dt).days + 1) / 365
     else:
         raise Exception('Unsupported type')
 
@@ -479,7 +486,18 @@ to_days = np.frompyfunc(timedelta2days, 1, 1)
 def get_v_tenor(dt: np.ndarray[date], calculation_dt: np.ndarray[Union[date, ql.Date]]) -> np.ndarray:
     if dt is None or len(dt) == 0:
         return np.array([])
-    return (to_days((dt - calculation_dt)) / 365).astype(float)
+    return ((to_days((dt - calculation_dt)) + 1) / 365).astype(float)
+
+
+def get_v_tenor_from_index(df):
+    v_calc_date = np.array(list(map(lambda x: x.date(), df.index.get_level_values('ts').to_pydatetime())))
+    return get_v_tenor(df.index.get_level_values('expiry').values, v_calc_date)
+
+
+def get_v_tenor_dt(tenor: np.ndarray[float], calculation_dt: np.ndarray[Union[date, ql.Date]]) -> List[date]:
+    if tenor is None or len(tenor) == 0:
+        return []
+    return [(calculation_dt + timedelta(days=365 * t)).date() - timedelta(days=1) for t in tenor]
 
 
 def get_moneyness(strike, spot) -> float:
@@ -497,7 +515,11 @@ def get_moneyness_fwd(equity: Equity, strike: float, spot: float, tenor: float) 
     return moneyness_fwd
 
 
-def get_moneyness_fwd_ln(equity: Equity, strike: float, spot: float, tenor: float) -> float:
+def get_moneyness_fwd_ln(equity: Equity,
+                         strike: float | np.ndarray,
+                         spot: float | np.ndarray,
+                         tenor: float | np.ndarray
+                         ) -> float | np.ndarray:
     """k = log(K/Se(r−δ)τ)"""
     return np.log(get_moneyness_fwd(equity, strike, spot, tenor))
 
@@ -716,38 +738,6 @@ def atm_iv_old_method(trades, quotes, optionContracts, n=1, resolution='60min'):
     count_ivs = (df_atm_iv != 0).sum(axis=1)
 
     return pd.Series(df_atm_iv.sum(axis=1) / count_ivs, index=df_strike_iv.index)
-
-
-def grid_search_garch_params():
-    # GRID Search. acf plot shows best p
-    p_range = range(1, 5)
-    q_range = range(1, 5)
-    o_range = range(0, 3)
-
-    # Initialize the best BIC and best parameters
-    best_bic = np.inf
-    best_params = None
-
-    # Iterate over all possible combinations of p, q, and o
-    for p in p_range:
-        for q in q_range:
-            for o in o_range:
-                # Create a GARCH(p, q, o) model
-                model = arch.arch_model(ps_iv, vol='GARCH', p=p, q=q, o=o)
-
-                # Fit the model to the data
-                results = model.fit(disp='off')
-
-                # Calculate the BIC for the current model
-                bic = results.bic
-
-                # Update the best BIC and best parameters if necessary
-                if bic < best_bic:
-                    best_bic = bic
-                    best_params = (p, q, o)
-    # Print the best BIC and best parameters
-    print(f'Best BIC: {best_bic:.2f}')
-    print(f'Best parameters: p={best_params[0]}, q={best_params[1]}, o={best_params[2]}')
 
 
 def aewma(vec: pd.Series | np.ndarray, alpha: float, gamma: float) -> np.ndarray:
@@ -1095,30 +1085,49 @@ def ps_index2option_contract(ps: pd.Series, equity: Equity) -> OptionContract:
 
     return OptionContract('', equity.underlying_symbol, expiry, strike, right)
 
+# delete soon
+# def ps2delta(ps: pd.Series, iv_col: str, calendar, day_count, rate, dividend, spot_column='spot') -> float:
+#     ts, expiry, strike, right = unpack_mi_df_index(ps)
+#     return greek_bsm(GreeksEuOption.delta, float(strike), expiry, ps[spot_column], right, ps[iv_col], ts.date(), calendar, day_count, rate, dividend)
+#
+#
+# def ps2gamma(ps: pd.Series, iv_col: str, calendar, day_count, rate, dividend, spot_column='spot') -> float:
+#     ts, expiry, strike, right = unpack_mi_df_index(ps)
+#     return greek_bsm(GreeksEuOption.gamma, float(strike), expiry, ps[spot_column], right, ps[iv_col], ts.date(), calendar, day_count, rate, dividend)
+#
+#
+# def ps2vega(ps: pd.Series, iv_col: str, calendar, day_count, rate, dividend, spot_column='spot') -> float:
+#     ts, expiry, strike, right = unpack_mi_df_index(ps)
+#     return greek_bsm(GreeksEuOption.vega, float(strike), expiry, ps[spot_column], right, ps[iv_col], ts.date(), calendar, day_count, rate, dividend)
+#
+# def ps2theta(ps: pd.Series, iv_col: str, calendar, day_count, rate, dividend, spot_column='spot') -> float:
+#     ts, expiry, strike, right = unpack_mi_df_index(ps)
+#     return greek_bsm(GreeksEuOption.theta, float(strike), expiry, ps[spot_column], right, ps[iv_col], ts.date(), calendar, day_count, rate, dividend)
+#
+#
+# def ps2iv(ps: pd.Series, price_col, calendar, day_count, rate, dividend, spot_column='spot') -> float:
+#     ts, expiry, strike, right = unpack_mi_df_index(ps)
+#     return implied_volatility(ps[price_col], float(strike), expiry, ps[spot_column], right, ts.date(), calendar, day_count, rate, dividend)
 
-def ps2delta(ps: pd.Series, iv_col: str, calendar, day_count, rate, dividend, spot_column='spot') -> float:
-    ts, expiry, strike, right = unpack_mi_df_index(ps)
-    return greek_bsm(GreeksEuOption.delta, float(strike), expiry, ps[spot_column], right, ps[iv_col], ts.date(), calendar, day_count, rate, dividend)
+
+def df2iv(df: pd.DataFrame, price_col_nm: str, rate: float, dividend_yield: float, spot_col_nm: str = 'spot', tenor_col_nm='tenor', na2zero=True) -> np.ndarray:
+    v: np.ndarray = get_v_iv(
+        p=df[price_col_nm].values,
+        s=df[spot_col_nm].values,
+        k=df.index.get_level_values('strike').astype(float).values,
+        t=df[tenor_col_nm].values,
+        r=rate,
+        right=df.index.get_level_values('right').map({OptionRight.call: 'c', OptionRight.put: 'p'}).values,
+        q=dividend_yield,
+        )
+    if na2zero:
+        # This should be handled better by first checking which prices are below intrinsic value and only send remaining values here.
+        v[np.isnan(v)] = 0
+    return v
 
 
-def ps2gamma(ps: pd.Series, iv_col: str, calendar, day_count, rate, dividend, spot_column='spot') -> float:
-    ts, expiry, strike, right = unpack_mi_df_index(ps)
-    return greek_bsm(GreeksEuOption.gamma, float(strike), expiry, ps[spot_column], right, ps[iv_col], ts.date(), calendar, day_count, rate, dividend)
-
-
-def ps2vega(ps: pd.Series, iv_col: str, calendar, day_count, rate, dividend, spot_column='spot') -> float:
-    ts, expiry, strike, right = unpack_mi_df_index(ps)
-    return greek_bsm(GreeksEuOption.vega, float(strike), expiry, ps[spot_column], right, ps[iv_col], ts.date(), calendar, day_count, rate, dividend)
-
-
-def ps2theta(ps: pd.Series, iv_col: str, calendar, day_count, rate, dividend, spot_column='spot') -> float:
-    ts, expiry, strike, right = unpack_mi_df_index(ps)
-    return greek_bsm(GreeksEuOption.theta, float(strike), expiry, ps[spot_column], right, ps[iv_col], ts.date(), calendar, day_count, rate, dividend)
-
-
-def ps2iv(ps: pd.Series, price_col, calendar, day_count, rate, dividend, spot_column='spot') -> float:
-    ts, expiry, strike, right = unpack_mi_df_index(ps)
-    return implied_volatility(ps[price_col], float(strike), expiry, ps[spot_column], right, ts.date(), calendar, day_count, rate, dividend)
+def get_v_iv(p: np.ndarray, s: np.ndarray, k: np.ndarray, t: np.ndarray, r: float, right: np.ndarray, q: float) -> np.ndarray:
+    return py_vollib_vectorized.vectorized_implied_volatility(p, s, k, t, r, right, q=q, model='black_scholes_merton', return_as='numpy')
 
 
 def ps2npv(ps: pd.Series, iv_col: str, calendar, day_count, rate, dividend, spot_column='spot') -> float:
@@ -1127,12 +1136,16 @@ def ps2npv(ps: pd.Series, iv_col: str, calendar, day_count, rate, dividend, spot
 
 
 def spot_from_df_equity_into_options(option_frame: OptionFrame):
+    # looks terrible, why not a join?
     option_frame.df_options['spot'] = None
     for ts, sub_df in option_frame.df_options.groupby(level='ts'):
         option_frame.df_options.loc[(ts, slice(None), slice(None), slice(None)), 'spot'] = option_frame.df_equity.loc[ts, 'close']
+    option_frame.df_options['spot'] = option_frame.df_options['spot'].astype(float)
 
 
 def val_from_df(df, expiry, strike, right, col_nm):
+    if 'ts' in df.index.names:
+        return df[col_nm].loc[(slice(None), expiry, strike, right)].iloc[-1]
     return df[col_nm].loc[(expiry, strike, right)]
 
 
@@ -1166,13 +1179,8 @@ def is_holiday(dt: date):
     return dt.weekday() in (5, 6) or dt in get_market_hours_holidays()
 
 
-def earnings_download_dates(sym: str, take=-1, biz_days_prior=3, biz_days_after=2):
-    try:
-        release_date = EarningsPreSessionDates(sym)[take]
-    except IndexError:
-        raise ValueError(f'No earnings dates found for {sym}.')
+def earnings_download_dates_start_end(release_date: date, biz_days_prior=3, biz_days_after=2) -> Tuple[date, date]:
     holidays = get_market_hours_holidays()
-    #[d.date() for d in cal.holidays(start=release_date - timedelta(days=30), end=release_date + timedelta(days=30)).to_pydatetime()]
 
     start = None
     end = None
@@ -1197,6 +1205,34 @@ def earnings_download_dates(sym: str, take=-1, biz_days_prior=3, biz_days_after=
 
     end = min(end, date.today() - timedelta(days=1))
     return start, end
+
+
+def earnings_download_dates(release_date: date, biz_days_prior=3, biz_days_after=2) -> List[date]:
+    return [dt.date() for dt in pd.date_range(*earnings_download_dates_start_end(release_date, biz_days_prior, biz_days_after)) if not is_holiday(dt)]
+
+
+def add_trade_days(dt: date, n: int) -> date:
+    holidays = get_market_hours_holidays()
+    while n != 0:
+        dt += timedelta(days=int(np.sign(n)))
+        if dt.weekday() < 5 and dt not in holidays:
+            n -= int(np.sign(n))
+    return dt
+
+
+def n_trade_days(dt1: date, dt2: date) -> int:
+    """Absolute number of trade dates between dt1 and dt2 including each"""
+    holidays = get_market_hours_holidays()
+    n = 0
+    for dt in pd.date_range(min((dt1, dt2)), max((dt1, dt2))):
+        if dt.weekday() < 5 and dt.date() not in holidays:
+            n += 1
+    return n
+
+
+def trade_days_between_dates(dt1: date, dt2: date) -> List[date]:
+    holidays = get_market_hours_holidays()
+    return [dt.date() for dt in pd.date_range(min((dt1, dt2)), max((dt1, dt2))) if dt.weekday() < 5 and dt.date() not in holidays]
 
 
 def apply_ds_ret_weights(m_dnlv01, f_weight_ds, cfg):
@@ -1376,16 +1412,26 @@ def get_market_hours_early_closes(market="Equity-usa-[*]") -> List[datetime]:
     return [datetime.strptime(k + ' ' + v, '%m/%d/%Y %H:%M:%S') for k, v in get_market_hours(market)["earlyCloses"].items()]
 
 
+def convert_to_hashable(arg):
+    if isinstance(arg, np.ndarray):
+        return str(arg)
+    elif isinstance(arg, dict):
+        return {k: convert_to_hashable(v) for k, v in arg.items()}
+    return arg
+
+
 def get_pkl_cache_key(clear_prefix='', *args, **kwargs):
     b = clear_prefix.encode()
+    _args = [convert_to_hashable(arg) for arg in args]
+    _kwargs = {k: convert_to_hashable(v) for k, v in kwargs.items()}
     try:
-        b += pickle.dumps(args)
+        b += pickle.dumps(_args)
     except Exception:
-        b += str(args).encode()
+        b += str(_args).encode()
     try:
-        b += pickle.dumps(kwargs)
+        b += pickle.dumps(_kwargs)
     except Exception:
-        b += str(kwargs).encode()
+        b += str(_kwargs).encode()
 
     digest = hashlib.md5(b).hexdigest()
     fn = f'{clear_prefix}-{digest}.pkl'
@@ -1400,8 +1446,13 @@ def cache_to_disk(clear_prefix, root):
             fn = get_pkl_cache_key(clear_prefix, *args, **kwargs)
 
             if os.path.exists(os.path.join(root, fn)):
-                with open(os.path.join(root, fn), 'rb') as f:
-                    obj = pickle.load(f)
+                try:
+                    with open(os.path.join(root, fn), 'rb') as f:
+                        obj = pickle.load(f)
+                except EOFError:
+                    obj = func(*args, **kwargs)
+                    with open(os.path.join(root, fn), 'wb') as f:
+                        pickle.dump(obj, f)
             else:
                 obj = func(*args, **kwargs)
                 with open(os.path.join(root, fn), 'wb') as f:
@@ -1414,9 +1465,74 @@ def cache_to_disk(clear_prefix, root):
     return cache_object
 
 
+def timer(func):
+    def wrapper(*args, **kwargs):
+        # nonlocal total
+        start = datetime.now()
+        result = func(*args, **kwargs)
+        duration = (datetime.now() - start).total_seconds()
+        # total += duration
+        print(f"Execution time: {duration:.2f} seconds")
+        return result
+
+    # total = 0
+    return wrapper
+
+
+def security_from_symbol(symbol: str, calc_date: date) -> Security:
+    from options.typess.option import Option
+
+    if ' ' in symbol:
+        return Option(OptionContract.from_ib_symbol(symbol), calc_date)
+    else:
+        return Equity(symbol)
+
+
+def exclude_outlier_quotes(df: pd.DataFrame, pf: Portfolio, equity: Equity) -> pd.DataFrame:
+    """
+    Outlier rows are removed unless they pertain to a holding. Those tagged to avoid modeling or pricing for these.
+    """
+    pd.options.display.max_columns = 8
+    # removing nonsense rows, may contain a holding. Keep but log it.
+    conditions = []
+    if all((c in df.columns for c in ('ask_iv', 'bid_iv'))):
+        conditions.append((df['ask_iv'] < df['bid_iv']))
+    if 'ask_iv' in df.columns:
+        conditions.append((df['ask_iv'] <= 0))
+    if all((c in df.columns for c in ('ask_iv', 'bid_iv', 'mid_price_iv'))):
+        conditions.append((df['mid_price_iv'] < df['bid_iv']) | (df['mid_price_iv'] > df['ask_iv']))
+    if all((c in df.columns for c in ('tenor', 'mid_iv'))):
+        conditions.append((df['tenor'] > 0.08) & (df['mid_iv'] > 2))
+        conditions.append((df['tenor'] > 0.3) & (df['mid_iv'] > 1))
+
+    df_outlier = df[reduce(operator.or_, conditions)] if conditions else pd.DataFrame(None)
+
+    if len(df_outlier) == 0:
+        return df
+
+    elif pf:
+        v_symbol = df_outlier.apply(lambda ps: ps_index2option_contract(ps, equity).ib_symbol(), axis=1)
+        v_holding_symbol = {h.symbol.upper() for h in pf.holdings}
+        df_outlier = df_outlier[~v_symbol.isin(v_holding_symbol)]
+        warning(f'''# Data Issues={len(df_outlier)}: {df_outlier[['ask_iv', 'mid_iv', 'bid_iv', 'tenor']]}''')
+        return df.loc[df.index.difference(df_outlier.index)]
+
+    else:
+        warning(f'''# Data Issues={len(df_outlier)}: {df_outlier[['ask_iv', 'mid_iv', 'bid_iv', 'tenor']]}''')
+        return df.loc[df.index.difference(df_outlier.index)]
+
+
 if __name__ == '__main__':
-    print(get_market_hours_holidays())
-    print(get_market_hours_early_closes())
-    sym, take = 'ON', -2
-    print(EarningsPreSessionDates(sym)[take])
-    print(earnings_download_dates(sym, take=take))
+    print(n_trade_days(date(2024, 8, 30), date(2024, 9, 3)))
+    print(n_trade_days(date(2024, 8, 27), date(2024, 8, 30)))
+    print(n_trade_days(date(2024, 8, 27), date(2024, 8, 26)))
+#     print(add_trade_days(date(2024, 8, 27), 1))
+#     print(add_trade_days(date(2024, 8, 27), -1))
+#     print(add_trade_days(date(2024, 8, 30), 1))
+#     print(add_trade_days(date(2024, 8, 26), -1))
+#     print(get_market_hours_holidays())
+#     print(get_market_hours_early_closes())
+#     sym, take = 'ON', -2
+#     release_date = EarningsPreSessionDates(sym)[take]
+#     print(release_date)
+#     print(earnings_download_dates_start_end(release_date))

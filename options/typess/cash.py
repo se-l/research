@@ -9,9 +9,12 @@ from options.typess.scenario import Scenario
 
 
 @dataclass
-class Equity(Security):
+class Cash(Security):
     symbol: str
     multiplier: int = 1
+
+    def __post_init__(self):
+        self.symbol = self.symbol.upper()
 
     @property
     def underlying_symbol(self) -> str:
@@ -24,16 +27,10 @@ class Equity(Security):
         return cls(symbol)
 
     def csv_name(self, tick_type: TickType, resolution: Resolution, date: datetime.date = None):
-        if resolution in (Resolution.minute, Resolution.second, Resolution.tick) and date:  # for minute, second, tick
-            return f'{date.strftime("%Y%m%d")}_{self.symbol.lower()}_{resolution}_{tick_type}.csv'
-        else:
-            return f'{self.symbol}.csv'
+        raise NotImplementedError
 
     def zip_name(self, tick_type: TickType, resolution: Resolution, date: datetime.date = None):
-        if resolution in (Resolution.daily, Resolution.hour):
-            return f'{self.symbol.lower()}.zip'
-        else:
-            return f'{date.strftime("%Y%m%d")}_{tick_type}.zip'
+        raise NotImplementedError
 
     @staticmethod
     def delta(*args, **kwargs):
@@ -47,8 +44,8 @@ class Equity(Security):
     def npv():
         return 1
 
-    def nlv(self, market_data: Dict[Security, SecurityDataSnap], q: float = 1, scenario=Scenario.mid):
-        return market_data[self].spot * self.multiplier * q
+    def nlv(self, market_data: Dict[str, SecurityDataSnap], q: float = 1, scenario=Scenario.mid):
+        return self.multiplier * q
 
     def __repr__(self):
         return f'{self.symbol.upper()}'
