@@ -1,18 +1,23 @@
 import math
-import pickle
 
 import QuantLib as ql
 import numpy as np
 import pandas as pd
 
-from datetime import datetime, date
-from typing import Iterable, Callable, Dict
+from datetime import datetime, date, timedelta
+from typing import Iterable, Callable, Dict, List, Tuple, Any, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from functools import lru_cache
 from math import fabs, erf, erfc
-from numba import njit
 
+from QuantLib import DateVector, DoubleVector
+from numba import njit
+from numpy import ndarray, dtype
+from numpy._typing import NDArray
+
+from options.typess.dividend import get_dividends, Dividend
+from options.typess.equity import Equity
 from options.typess.security import Security, SecurityDataSnap
 from options.typess.scenario import Scenario
 from shared.constants import DiscountRateMarket
@@ -20,6 +25,9 @@ from options.ql_helper import engined_option
 from options.typess.enums import OptionPricingModel, OptionRight, TickType, Resolution
 from options.typess.option_contract import OptionContract
 import numba as nb
+import merlin
+
+from shared.yield_curve import YieldCurve, ZeroCurveData
 
 
 @dataclass
@@ -44,6 +52,12 @@ class OptionSerialized:
     price_underlying: float
     volatility: float
 
+@dataclass
+class Style:
+    European = 'European'
+    American = 'American'
+    AmericanDiv = 'AmericanDiv'
+
 
 class Option(Security):
     # Ideally refactored to combine with OptionContract
@@ -53,8 +67,11 @@ class Option(Security):
     minVol = 0.0001
     maxVol = 4.0
 
-    def __init__(self, option_contract: OptionContract, calculation_date: date, price_underlying: float = 0, volatility: float = 0):
-        from options.helper import get_dividend_yield
+    def __init__(self, option_contract: OptionContract, calculation_date: date, price_underlying: float = 0, volatility: float = 0, option_constructor: ql.OneAssetOption = ql.VanillaOption, style=Style.American, optionPricingModel: OptionPricingModel=None, dividends=None, q=False):
+        self.q = q
+        self.style = style
+        if dividends is None:
+            dividends = []
 
         self.optionContract = option_contract
         self.expiry = self.optionContract.expiry
@@ -71,8 +88,7 @@ class Option(Security):
         self.calendar = ql.UnitedStates(ql.UnitedStates.NYSE)
         self.dayCount = ql.Actual365Fixed()
         self.payoff = ql.PlainVanillaPayoff(self.optionType, self.strike)
-        self.eu_exercise = ql.EuropeanExercise(self.maturityDate)
-        self.am_exercise = ql.AmericanExercise(self.calculationDateQl, self.maturityDate)
+        self.exercise = ql.EuropeanExercise(self.maturityDate) if style == Style.European else ql.AmericanExercise(self.calculationDateQl, self.maturityDate)
 
         self.underlyingQuote = ql.SimpleQuote(price_underlying)
         self.underlyingQuoteHandle = ql.QuoteHandle(self.underlyingQuote)
@@ -83,27 +99,36 @@ class Option(Security):
         self.riskFreeRateQuote = ql.SimpleQuote(DiscountRateMarket)
         self.riskFreeRateQuoteHandle = ql.QuoteHandle(self.riskFreeRateQuote)
 
-        # Annualized Yields
-        self.dividendRateQuote = ql.SimpleQuote(get_dividend_yield(option_contract.underlying_symbol))
-        self.dividendRateQuoteHandle = ql.QuoteHandle(self.dividendRateQuote)
+        self.dividendSchedule = []
+        args = [self.payoff, self.exercise]
+        if style == Style.AmericanDiv:
+            self.dividendDates = DateVector([ql.Date(d.ex_date.day, d.ex_date.month, d.ex_date.year) for d in dividends if d.ex_date <= self.optionContract.expiry])
+            self.dividendAmounts = DoubleVector([d.amount for d in dividends if d.ex_date <= self.optionContract.expiry])
+            self.dividendSchedule: ql.DividendSchedule = ql.DividendSchedule([ql.FixedDividend(a, d) for a, d in zip(self.dividendAmounts, self.dividendDates)])
+            args += [self.dividendDates, self.dividendAmounts]
+        else:
+            from options.helper import get_dividend_yield
+            # Annualized Yields
+            self.dividendRateQuote = ql.SimpleQuote(get_dividend_yield(option_contract.underlying_symbol))
+            # self.dividendRateQuote = ql.SimpleQuote(0)
+            self.dividendRateQuoteHandle = ql.QuoteHandle(self.dividendRateQuote)
 
-        self.am_option = engined_option(ql.VanillaOption(self.payoff, self.am_exercise), self.get_bsm(), optionPricingModel=OptionPricingModel.CoxRossRubinstein)
-        self.eu_option = engined_option(ql.VanillaOption(self.payoff, self.eu_exercise), self.get_bsm(), optionPricingModel=OptionPricingModel.AnalyticEuropeanEngine)
+        self.option = engined_option(option_constructor(*args), self.get_bsm(), optionPricingModel=optionPricingModel or OptionPricingModel.AnalyticEuropeanEngine, dividend_schedule=self.dividendSchedule)
 
     def __eq__(self, other):
-        return self.optionContract.__repr__() == other.optionContract.__repr__()
+        return self.optionContract.__repr__() == other.optionContract.__repr__() if isinstance(other, Option) else False
 
     def __ge__(self, other):
-        return self.optionContract.__repr__() >= other.optionContract.__repr__()
+        return self.optionContract.__repr__() >= other.optionContract.__repr__() if isinstance(other, Option) else False
 
     def __gt__(self, other):
-        return self.optionContract.__repr__() > other.optionContract.__repr__()
+        return self.optionContract.__repr__() > other.optionContract.__repr__() if isinstance(other, Option) else False
 
     def __lt__(self, other):
-        return self.optionContract.__repr__() < other.optionContract.__repr__()
+        return self.optionContract.__repr__() < other.optionContract.__repr__() if isinstance(other, Option) else False
 
     def __le__(self, other):
-        return self.optionContract.__repr__() <= other.optionContract.__repr__()
+        return self.optionContract.__repr__() <= other.optionContract.__repr__() if isinstance(other, Option) else False
 
     @property
     def symbol(self): return self.optionContract.symbol or self.__repr__()
@@ -172,7 +197,7 @@ class Option(Security):
         # impliedVolatility(VanillaOption self, Real targetValue, ext::shared_ptr< GeneralizedBlackScholesProcess > const & process, Real accuracy=1.0e-4, Size maxEvaluations=100, Volatility minVol=1.0e-4, Volatility maxVol=4.0) -> Volatility
         # impliedVolatility(VanillaOption self, Real targetValue, ext::shared_ptr< GeneralizedBlackScholesProcess > const & process, DividendSchedule dividends, Real accuracy=1.0e-4, Size maxEvaluations=100, Volatility minVol=1.0e-4, Volatility maxVol=4.0) -> Volatility
         try:
-            return self.eu_option.impliedVolatility(priceOption, bsm, self.accuracy, self.max_iterations, self.minVol, maxVol)
+            return self.option.impliedVolatility(priceOption, bsm, self.accuracy, self.max_iterations, self.minVol, maxVol)
         except Exception as e:
             if 'root not bracketed' not in str(e):
                 print(e)
@@ -203,9 +228,13 @@ class Option(Security):
 
     def get_bsm(self):
         flat_ts = ql.YieldTermStructureHandle(ql.FlatForward(self.calculationDateQl, self.riskFreeRateQuoteHandle, self.dayCount))
-        dividend_yield = ql.YieldTermStructureHandle(ql.FlatForward(self.calculationDateQl, self.dividendRateQuoteHandle, self.dayCount))
         flat_vol_ts = ql.BlackVolTermStructureHandle(ql.BlackConstantVol(self.calculationDateQl, self.calendar, self.volQuoteHandle, self.dayCount))
-        return ql.BlackScholesMertonProcess(self.underlyingQuoteHandle, dividend_yield, flat_ts, flat_vol_ts)
+        if self.style == Style.AmericanDiv:
+            return ql.BlackScholesProcess(self.underlyingQuoteHandle, flat_ts, flat_vol_ts)
+        else:
+            dividend_yield = ql.YieldTermStructureHandle(ql.FlatForward(self.calculationDateQl, self.dividendRateQuoteHandle, self.dayCount))
+            return ql.BlackScholesMertonProcess(self.underlyingQuoteHandle, dividend_yield, flat_ts, flat_vol_ts)
+
 
     @lru_cache(maxsize=2**12)
     def npv(self, vol: float, price_underlying: float, calculation_date: date):
@@ -308,59 +337,118 @@ class Option(Security):
         self.__dict__.update(option.__dict__)
 
 
+def dividends2amount_times(dividends: List[Dividend], calculation_date: date) -> Tuple[List[float], List[float]]:
+    return (
+        [d.amount for d in dividends],
+        [((d.ex_date - calculation_date).days + 1) / 365 for d in dividends]
+    )
+
+
 @nb.njit(fastmath=True)
-def get_d1(s: float | np.ndarray, k: float | np.ndarray, t: float | np.ndarray, iv: float | np.ndarray, r: float | np.ndarray, q: float | np.ndarray):
+def get_d1(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], iv: float | NDArray[np.float64], r: float | NDArray[np.float64], q: float | NDArray[np.float64]):
     return (np.log(s / k) + (r - q + iv ** 2 / 2) * t) / (iv * np.sqrt(t))
 
 
 @nb.njit(fastmath=True)
-def get_d2(s: float | np.ndarray, k: float | np.ndarray, t: float | np.ndarray, iv: float | np.ndarray, r: float | np.ndarray, q: float | np.ndarray):
+def get_d2(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], iv: float | NDArray[np.float64], r: float | NDArray[np.float64], q: float | NDArray[np.float64]):
     return (np.log(s / k) + (r - q - iv ** 2 / 2) * t) / (iv * np.sqrt(t))
     # return get_d1(s, k, t, iv, r, q) - iv * np.sqrt(t)
 
 
 @nb.njit(fastmath=True)
-def get_d1_derivative(s: float | np.ndarray, k: float | np.ndarray, t: float | np.ndarray, iv: float | np.ndarray, r: float | np.ndarray, q: float | np.ndarray):
+def get_d1_derivative(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], iv: float | NDArray[np.float64], r: float | NDArray[np.float64], q: float | NDArray[np.float64]):
     d1 = get_d1(s, k, t, iv, r, q)
     return np.exp(-d1**2/2) / np.sqrt(2 * np.pi)
 
 
 @nb.njit(fastmath=True)
-def price_call(s: float | np.ndarray, k: float | np.ndarray, t: float | np.ndarray, iv: float | np.ndarray, r: float | np.ndarray, q: float | np.ndarray):
+def price_call(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], iv: float | NDArray[np.float64], r: float | NDArray[np.float64], q: float | NDArray[np.float64]):
     d1 = get_d1(s, k, t, iv, r, q)
     d2 = d1 - iv * np.sqrt(t)
     return s * np.exp(-q * t) * ndtr_numba_v(d1) - k * np.exp(-r * t) * ndtr_numba_v(d2)
 
 
 @nb.njit(fastmath=True)
-def price_put(s: float | np.ndarray, k: float | np.ndarray, t: float | np.ndarray, iv: float | np.ndarray, r: float | np.ndarray, q: float | np.ndarray):
+def price_put(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], iv: float | NDArray[np.float64], r: float | NDArray[np.float64], q: float | NDArray[np.float64]):
     d1 = get_d1(s, k, t, iv, r, q)
     d2 = d1 - iv * np.sqrt(t)
     return k * np.exp(-r * t) * ndtr_numba_v(-d2) - s * np.exp(-q * t) * ndtr_numba_v(-d1)
 
 
 @nb.njit(fastmath=True)
-def delta_call(s: float | np.ndarray, k: float | np.ndarray, t: float | np.ndarray, iv: float | np.ndarray, r: float | np.ndarray, q: float | np.ndarray):
+def delta_call(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], iv: float | NDArray[np.float64], r: float | NDArray[np.float64], q):
     d1 = get_d1(s, k, t, iv, r, q)
     return np.exp(-q * t) * ndtr_numba_v(d1)
 
 
 @nb.njit(fastmath=True)
-def delta_put(s: float | np.ndarray, k: float | np.ndarray, t: float | np.ndarray, iv: float | np.ndarray, r: float | np.ndarray, q: float | np.ndarray):
+def delta_put(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], iv: float | NDArray[np.float64], r: float | NDArray[np.float64], q):
     d1 = get_d1(s, k, t, iv, r, q)
     return np.exp(-q * t) * (ndtr_numba_v(d1) - 1)
 
 
 @nb.njit(fastmath=True)
-def gamma(s: float | np.ndarray, k: float | np.ndarray, t: float | np.ndarray, iv: float | np.ndarray, r: float | np.ndarray, q: float | np.ndarray):
+def gamma(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], iv: float | NDArray[np.float64], r: float | NDArray[np.float64], q: float | NDArray[np.float64]):
     d1_drv = get_d1_derivative(s, k, t, iv, r, q)
     return np.exp(-q * t) * d1_drv / (s * iv * np.sqrt(t))
 
 
 @nb.njit(fastmath=True)
-def get_vega(s: float | np.ndarray, k: float | np.ndarray, t: float | np.ndarray, iv: float | np.ndarray, r: float | np.ndarray, q: float | np.ndarray):
+def get_vega(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], iv: float | NDArray[np.float64], r: float | NDArray[np.float64], q):
     d1_drv = get_d1_derivative(s, k, t, iv, r, q)
     return s * np.exp(-q * t) * np.sqrt(t) * d1_drv / 100
+
+def get_price_cuda(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], v_is_call: NDArray[int], iv: float | NDArray[np.float64], dividends: List[Dividend], calculation_date: date | NDArray[date], yield_curve:ZeroCurveData = None, equity: Equity=None, cpu=False) -> ndarray[Any, dtype[Any]]:
+    if not isinstance(calculation_date, (date, datetime)):
+        v = np.zeros_like(s)
+        unique_dt, inverse = np.unique(calculation_date, return_inverse=True)
+        for i, dt in enumerate(unique_dt):
+            ix = inverse == i
+            v[ix] = get_price_cuda(s[ix], k[ix], t[ix], v_is_call[ix], iv[ix], dividends=dividends, calculation_date=dt, yield_curve=yield_curve, equity=equity, cpu=cpu)
+        return v
+    else:
+        yield_curve = yield_curve or YieldCurve().get_zero_curve(calculation_date, equity)
+        div_amounts, div_times = dividends2amount_times(dividends, calculation_date)
+        if not cpu:
+            return np.array(merlin.get_v_fd_price(
+                spots=s, strikes=k, tenors=t, sigmas=iv, v_is_call=v_is_call, rates_curve=yield_curve.rates, rates_times=yield_curve.times, div_amounts=div_amounts, div_times=div_times,
+                time_steps=200, space_steps=200
+            ))
+        else:
+            return np.asarray(merlin.get_v_fd_price_cpu(
+                spots=s, strikes=k, tenors=t, sigmas=iv, v_is_call=v_is_call, rates_curve=yield_curve.rates, rates_times=yield_curve.times, div_amounts=div_amounts, div_times=div_times,
+                time_steps=200, space_steps=200
+            ))
+
+def get_delta_cuda(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], v_is_call: NDArray[int], iv: NDArray[np.float64], dividends: List[Dividend], calculation_date: date | NDArray[date], yield_curve:ZeroCurveData = None, equity: Equity=None) -> ndarray[Any, dtype[Any]]:
+    if not isinstance(calculation_date, date):
+        v = np.zeros_like(s)
+        unique_dt, inverse = np.unique(calculation_date, return_inverse=True)
+        for i, dt in enumerate(unique_dt):
+            ix = inverse == i
+            v[ix] = get_delta_cuda(s[ix], k[ix], t[ix], v_is_call[ix], iv=iv[ix], dividends=dividends, calculation_date=dt, yield_curve=yield_curve, equity=equity)
+        return v
+    else:
+        yield_curve = yield_curve or YieldCurve().get_zero_curve(calculation_date, equity)
+        div_amounts, div_times = dividends2amount_times(dividends, calculation_date)
+        return np.array(merlin.get_v_fd_delta(
+            spots=s, strikes=k, tenors=t, v_is_call=v_is_call, sigmas=iv, rates_curve=yield_curve.rates, rates_times=yield_curve.times, div_amounts=div_amounts, div_times=div_times,
+        ))
+
+def get_vega_cuda(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], v_is_call: NDArray[int], iv: NDArray[np.float64], dividends: List[Dividend], calculation_date: date | NDArray[date], yield_curve:ZeroCurveData = None, equity: Equity=None) -> ndarray[Any, dtype[Any]]:
+    if not isinstance(calculation_date, date):
+        v = np.zeros_like(s)
+        unique_dt, inverse = np.unique(calculation_date, return_inverse=True)
+        for i, dt in enumerate(unique_dt):
+            ix = inverse == i
+            v[ix] = get_vega_cuda(s[ix], k[ix], t[ix], v_is_call[ix], iv[ix], dividends=dividends, calculation_date=dt, yield_curve=yield_curve, equity=equity)
+        return v
+    else:
+        yield_curve = yield_curve or YieldCurve().get_zero_curve(calculation_date, equity)
+        div_amounts, div_times = dividends2amount_times(dividends, calculation_date)
+        return np.array(merlin.get_v_fd_vega(
+            spots=s, strikes=k, tenors=t, v_is_call=v_is_call, sigmas=iv, rates_curve=yield_curve.rates, rates_times=yield_curve.times, div_amounts=div_amounts, div_times=div_times,
+        ))
 
 
 _SQRT2 = math.sqrt(2)
@@ -368,7 +456,7 @@ NPY_SQRT1_2 = 1.0 / np.sqrt(2)
 
 
 @njit(cache=True, fastmath=True)
-def ndtr_numba_v(arr: np.ndarray):
+def ndtr_numba_v(arr: NDArray[np.float64]):
     if isinstance(arr, float):
         return ndtr_numba(arr)
 
@@ -467,9 +555,7 @@ def test_price_iv_price_loop():
 
         option = sample.option
         rate = option.riskFreeRateQuote.value()
-        dividend_yield = option.dividendRateQuote.value()
-        day_count = ql.Actual365Fixed()
-        calendar = ql.UnitedStates(ql.UnitedStates.NYSE)
+        dividends = get_dividends(equity.symbol.upper(), v_calc_date[0], v_calc_date[-1])
 
         # t = np.array([get_tenor(sample.expiry, calculation_date)])
         # r = option.riskFreeRateQuote.value()
@@ -489,7 +575,7 @@ def test_price_iv_price_loop():
             'spot': [s],
             'price': [11.50],
         }).set_index(['ts', 'expiry', 'strike', 'right'])
-        ps2iv_ivs = df['bid_iv'] = df2iv(df, price_col_nm='price', rate=rate, dividend_yield=dividend_yield)
+        # ps2iv_ivs = df['bid_iv'] = df2iv(df, price_col_nm='price', rate=rate, dividends=dividends, calculation_date=)
         # ps2iv_ivs = df.apply(partial(ps2iv, price_col=f'price', calendar=calendar, day_count=day_count, rate=rate, dividend=dividend_yield), axis=1)
 
         ql_p_of_iv_ql = option.npv(iv_ql_price, s, calculation_date)
@@ -529,45 +615,262 @@ def speed_compare_cdf_calc():
     # 3
 
 
+def _to_ql_date(d: date) -> ql.Date:
+    return ql.Date(d.day, d.month, d.year)
+
+def build_ql_zero_curve(
+    calculation_date: date,
+    curve: ZeroCurveData,
+    day_count: ql.DayCounter = ql.Actual365Fixed(),
+    calendar: ql.Calendar = ql.UnitedStates(ql.UnitedStates.NYSE),
+) -> ql.YieldTermStructureHandle:
+    """
+    Build a QuantLib ZeroCurve from (date, zero_rate) points.
+    Rates are interpreted as continuously-compounded zero rates with Actual/365.
+    """
+    calc = _to_ql_date(calculation_date)
+    ql.Settings.instance().evaluationDate = calc
+
+    dates = ql.DateVector([_to_ql_date(calculation_date + timedelta(days=t*365)) for t in curve.times] if curve else [calc, _to_ql_date(calculation_date + timedelta(days=999))])
+    rates = ql.DoubleVector(curve.rates if curve else [0, 0])
+
+    zc = ql.ZeroCurve(dates, rates, day_count, calendar)
+    return ql.YieldTermStructureHandle(zc)
+
+def _make_american_option_with_discrete_divs(
+    calculation_date: date,
+    expiry: date,
+    strike: float,
+    right: OptionRight,
+) -> ql.OneAssetOption:
+    """
+    Some QuantLib-Python builds don't expose ql.DividendVanillaOption.
+    We support both:
+      1) ql.DividendVanillaOption (if available)
+      2) ql.VanillaOption, with the dividend schedule passed to the FD engine (if your binding supports it)
+    """
+    calc_dt = _to_ql_date(calculation_date)
+    exp_dt = _to_ql_date(expiry)
+
+    option_type = ql.Option.Call if right == OptionRight.call else ql.Option.Put
+    payoff = ql.PlainVanillaPayoff(option_type, float(strike))
+    exercise = ql.AmericanExercise(calc_dt, exp_dt)
+    return ql.VanillaOption(payoff, exercise)
+
+def _build_dividend_schedule(
+    cash_dividends: Sequence[Dividend],
+    expiry: date,
+) -> ql.DividendSchedule:
+    divs = [d for d in cash_dividends if d.ex_date <= expiry]
+    div_dates = [_to_ql_date(d.ex_date) for d in divs]
+    div_amounts = [float(d.amount) for d in divs]
+    return ql.DividendSchedule([ql.FixedDividend(a, dt) for a, dt in zip(div_amounts, div_dates)])
+
+def price_american_option_ql_discrete_divs(
+    calculation_date: date,
+    expiry: date,
+    spot: float,
+    strike: float,
+    iv: float,
+    right: OptionRight,
+    cash_dividends: Sequence[Dividend],
+    zero_curve: ZeroCurveData | None,
+    steps_time: int = 200,
+    steps_grid: int = 200,
+) -> float:
+    """
+    American option with discrete cash dividends + explicit yield curve.
+
+    Important:
+      - If your QuantLib-Python build does NOT expose DividendVanillaOption, we fall back to
+        VanillaOption and try FD engines that accept a DividendSchedule.
+      - If none of the engine constructors in your build accept a dividend schedule, you’ll need
+        to upgrade QuantLib-Python/QuantLib (or use a different approach).
+    """
+    calendar = ql.UnitedStates(ql.UnitedStates.NYSE)
+    day_count = ql.Actual365Fixed()
+
+    calc_dt = _to_ql_date(calculation_date)
+    ql.Settings.instance().evaluationDate = calc_dt
+
+    option = _make_american_option_with_discrete_divs(
+        calculation_date=calculation_date,
+        expiry=expiry,
+        strike=strike,
+        right=right,
+    )
+
+    dividend_schedule = _build_dividend_schedule(cash_dividends, expiry)
+
+    spot_h = ql.QuoteHandle(ql.SimpleQuote(float(spot)))
+    vol_ts = ql.BlackVolTermStructureHandle(
+        ql.BlackConstantVol(calc_dt, calendar, ql.QuoteHandle(ql.SimpleQuote(float(iv))), day_count)
+    )
+    r_ts = build_ql_zero_curve(calculation_date, zero_curve, day_count=day_count, calendar=calendar)
+    process = ql.BlackScholesProcess(spot_h, r_ts, vol_ts)
+    engine = ql.FdBlackScholesVanillaEngine(process, dividend_schedule, steps_time, steps_grid)
+
+    option.setPricingEngine(engine)
+    return float(option.NPV())
+
+
+
+def _pct_diff(a: float, b: float) -> float:
+    """
+    Percent difference vs reference a:
+        100 * (b - a) / a
+    """
+    if a == 0.0:
+        return np.inf if b != 0.0 else 0.0
+    return 100.0 * (b - a) / a
+
+
+def run_american_ql_vs_cuda_tests() -> None:
+    calculation_date = date(2024, 6, 27)
+    spot = 100.0
+
+    # cash_divs = get_dividends('FDX', calculation_date, calculation_date + timedelta(days=900))
+    cash_divs = []
+    yield_curve = YieldCurve().get_zero_curve(calculation_date)
+    # yield_curve = ZeroCurveData([0,3], [0.05, 0.05])
+    # yield_curve = ZeroCurveData([0,3], [0.0, 0.0])
+
+    # ~20 test cases varying right, iv, strike, tenor
+    rights = [OptionRight.call, OptionRight.put]
+    ivs = [0.12, 0.25, 0.35, 0.5]
+    strikes = [70.0, 85.0, 100.0, 115.0, 130.0]
+    tenors_days = [30, 60, 90, 180, 365, 730]
+
+    # Pick 20 deterministic combinations (no randomness)
+    cases = []
+    for i in range(20):
+        right = rights[i % len(rights)]
+        iv = ivs[(i // 2) % len(ivs)]
+        strike = strikes[i % len(strikes)]
+        days = tenors_days[(i // 3) % len(tenors_days)]
+        expiry = calculation_date + timedelta(days=int(days))
+        cases.append((right, iv, strike, days, expiry))
+
+    print("Running %d American option tests: QuantLib (discrete divs + curve) vs get_price_cuda", len(cases))
+
+    for idx, (right, iv, strike, days, expiry) in enumerate(cases, start=1):
+        # QuantLib
+        price_ql = price_american_option_ql_discrete_divs(
+            calculation_date=calculation_date,
+            expiry=expiry,
+            spot=spot,
+            strike=strike,
+            iv=iv,
+            right=right,
+            cash_dividends=cash_divs,
+            zero_curve=yield_curve,
+            steps_time=200,
+            steps_grid=200,
+        )
+
+        # CUDA FD pricer
+        t = np.array([days / 365.0], dtype=np.float64)
+        v_is_call = np.array([1 if right == OptionRight.call else 0], dtype=np.int32)
+
+        price_cuda = float(
+            get_price_cuda(
+                s=np.array([spot], dtype=np.float64),
+                k=np.array([strike], dtype=np.float64),
+                t=t,
+                v_is_call=v_is_call,
+                iv=np.array([iv], dtype=np.float64),
+                dividends=cash_divs,
+                calculation_date=calculation_date,
+                yield_curve=yield_curve,
+                cpu=True,
+            )[0]
+        )
+
+        pct = _pct_diff(price_ql, price_cuda)
+        if abs(pct) > 0.1 and price_ql >= 0.01:
+            print(
+                f"case={idx} spot={spot:.2f} right={right} iv={iv:.3f} K={strike:.2f} tenor={t[0]:.3f}  QL={price_ql:.6f} CUDA={price_cuda:.6f}  pct_diff(CUDA-QL)={pct:.4f}",
+            )
+
+
+
 if __name__ == '__main__':
-    from options.helper import get_tenor
-    from statistics import NormalDist
-    # price_calcs()
-
-    calculationDate = date(2024, 4, 5)
-    expiry = date(2024, 4, 5)
-    strike = Decimal('28.0')
-    right = OptionRight.put
-    contract = OptionContract('contract', 'FDX', expiry, strike, right)
-    print(pickle.dumps(contract))
-    ql.Settings.instance().evaluationDate = ql.Date(calculationDate.day, calculationDate.month, calculationDate.year)
-    option = Option(contract, calculationDate)
-    pickled = pickle.dumps(option)
-    option2 = pickle.loads(pickled)
-    print(option2 == option)
-    dct1 = {option: 1}
-    print(dct1[option2])
-    s = 28.15
-    model_iv = option.iv(1.05, s, calculationDate)
-    model_price = option.npv(model_iv, s, calculationDate)
-    t = np.array([get_tenor(expiry, calculationDate)])
-    r = option.riskFreeRateQuote.value()
-    q = option.dividendRateQuote.value()
-    f: Callable = price_put if right == OptionRight.put else price_call
-    model_price2 = f(s, np.array([float(strike)]), t, np.array([model_iv]), r, q)
-    print(model_price - model_price2[0])
-
-    print(option.iv(14.35, s, calculationDate))
-
-    print(f'NPV: {option.npv(0.356, 310.1, calculationDate)}')
-
-    option.volQuote.setValue(0.411)
-
-    print(option.iv(0.8, 45, date(2023, 6, 5)))
-    option.underlyingQuote.setValue(17.49825)
+    run_american_ql_vs_cuda_tests()
+    # from options.helper import get_tenor, get_dividend_amount_times, dividends2amount_times
+    # import py_vollib.black_scholes_merton.implied_volatility
+    # import py_vollib_vectorized
+    # from statistics import NormalDist
+    # # price_calcs()
+    # from datetime import timedelta
     #
-    # print(f'Delta: {option.delta()}')
-    # print(f'Theta: {option.theta()}')
+    # c = OptionContract.from_ib_symbol("DAL   250705C00050000")
+    # c = OptionContract.from_ib_symbol("DAL   250705P00050000")
     #
-    # print(f'ThetaPerDay: {option.thetaPerDay()}')
-    # print(f'Vega: {option.vega()}')
+    # calculationDate = date(2024, 6, 27)
+    # expiry = c.expiry
+    # strike = float(c.strike)
+    # right = c.right
+    #
+    # ql.Settings.instance().evaluationDate = ql.Date(calculationDate.day, calculationDate.month, calculationDate.year)
+    # divs = get_dividends('DAL', calculationDate, c.expiry + timedelta(days=1))
+    #
+    # p = 15.0
+    # s = 50.0
+    #
+    # # EU Analytical same as super fast py_vollib
+    # option_eu = Option(c, calculationDate, option_constructor=ql.VanillaOption, style=Style.European, optionPricingModel=OptionPricingModel.AnalyticEuropeanEngine)
+    # print("EU Q Option %s" % option_eu.iv(p, s,calculationDate))
+    #
+    # # American - different engine - same result - Identical - lower IV than euro because early exercise right.
+    # # print("AM Q BAW Option %s" % Option(c, calculationDate, option_constructor=ql.VanillaOption, style=Style.American, optionPricingModel=OptionPricingModel.BaroneAdesiWhaleyApproximationEngine).iv(p, s, calculationDate))
+    # # print("AM Q CRR Option %s" % Option(c, calculationDate, option_constructor=ql.VanillaOption, style=Style.American, optionPricingModel=OptionPricingModel.CoxRossRubinstein).iv(p, s, calculationDate))
+    # print("AM Div Q FD Option %s" % Option(c, calculationDate, option_constructor=ql.VanillaOption, style=Style.American, optionPricingModel=OptionPricingModel.FdBlackScholesVanillaEngine).iv(p, s, calculationDate))
+    #
+    # # American no divs, no Q = identical. Put higher IV than american with DIV because no Div and Call has lower IV than with Div
+    # print("AM NoDiv FD Option %s" % Option(c, calculationDate, option_constructor=ql.VanillaOption, style=Style.AmericanDiv, dividends=[], optionPricingModel=OptionPricingModel.FdBlackScholesVanillaEngine).iv(p, s, calculationDate))
+    # # print("AM Div2 Q Option %s" % Option(c, calculationDate, option_constructor=ql.DividendVanillaOption, style=Style.AmericanDiv, dividends=[], optionPricingModel=OptionPricingModel.FdBlackScholesVanillaEngineDivSchedule).iv(p, s, calculationDate))
+    # # print("AM Div ! BAW Option %s" % Option(c, calculationDate, option_constructor=ql.DividendVanillaOption, style=Style.AmericanDiv, dividends=[], optionPricingModel=OptionPricingModel.BaroneAdesiWhaleyApproximationEngine).iv(p, s, calculationDate))
+    #
+    # # Discrete Dividends lead to significantly lower IV - all Identical IV
+    # # Call = Higher IV than w/o div ; Put = Lower IV than w/o div
+    # # print("AM DivFixed BAW Option %s" % Option(c, calculationDate, option_constructor=ql.DividendVanillaOption, style=Style.AmericanDiv, dividends=divs, optionPricingModel=OptionPricingModel.BaroneAdesiWhaleyApproximationEngine).iv(p, s, calculationDate))
+    # # The one to build now
+    # print("AM DivFixed FD Option %s" % Option(c, calculationDate, option_constructor=ql.VanillaOption, style=Style.AmericanDiv, dividends=divs, optionPricingModel=OptionPricingModel.FdBlackScholesVanillaEngine).iv(p, s, calculationDate))
+    # print("AM DivFixed2 Option %s" % Option(c, calculationDate, option_constructor=ql.DividendVanillaOption, style=Style.AmericanDiv, dividends=divs, optionPricingModel=OptionPricingModel.FdBlackScholesVanillaEngineDivSchedule).iv(p, s, calculationDate))
+
+
+    # def get_v_iv(p: NDArray[np.float64], s: NDArray[np.float64], k: NDArray[np.float64], t: NDArray[np.float64], r: float, right: np.ndarray, q: float) -> np.ndarray:
+    #     return py_vollib_vectorized.vectorized_implied_volatility(p, s, k, t, r, right, q=q, model='black_scholes_merton', return_as='numpy')
+
+    # print("EU pyvoillib Q Option %f", get_v_iv(
+    #     np.array([p]),
+    #     np.array([s]),
+    #     np.array([strike]),
+    #     np.array([get_tenor(expiry, calculationDate)]),
+    #     option_eu.riskFreeRateQuote.value(),
+    #     np.array([right[0]]),
+    #     option_eu.dividendRateQuote.value()
+    # ))
+
+    # model_price = option.npv(model_iv, s, calculationDate)
+    # t = np.array([get_tenor(expiry, calculationDate)])
+    # r = option.riskFreeRateQuote.value()
+    # q = option.dividendRateQuote.value()
+    # f: Callable = price_put if right == OptionRight.put else price_call
+    # # model_price2 = f(s, np.array([float(strike)]), t, np.array([model_iv]), r, q)
+    # # print(model_price - model_price2[0])
+    #
+    # print(option.iv(5.05, s, calculationDate))
+    #
+    # # print(f'NPV: {option.npv(0.356, 310.1, calculationDate)}')
+    # #
+    # # option.volQuote.setValue(0.411)
+    # #
+    # # print(option.iv(0.8, 45, date(2023, 6, 5)))
+    # # option.underlyingQuote.setValue(17.49825)
+    # # #
+    # # # print(f'Delta: {option.delta()}')
+    # # # print(f'Theta: {option.theta()}')
+    # # #
+    # # # print(f'ThetaPerDay: {option.thetaPerDay()}')
+    # # # print(f'Vega: {option.vega()}')

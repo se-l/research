@@ -21,6 +21,8 @@ class Paths:
     path_data = path_trade.joinpath('data')
     path_ib = path_trade.joinpath('ib')
 
+    path_data_alternative = path_data.joinpath('alternative')
+    path_data_interest_rate = path_data_alternative.joinpath('interest-rate')
     path_symbol_properties = path_data.joinpath('symbol-properties')
     path_market_hours = path_data.joinpath('market-hours')
     path_activity_reports_ytd = path_ib.joinpath('activityReportsYTD')

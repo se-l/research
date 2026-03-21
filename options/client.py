@@ -12,11 +12,12 @@ from functools import reduce
 from typing import List, Dict, Union, Set, Iterable
 from zipfile import ZipFile
 
+from options.typess.security import Security
 from shared.constants import file_root
 from options.typess.enums import TickType, CsvHeader, Resolution, SecurityType
 from options.typess.equity import Equity
 from options.typess.option_contract import OptionContract
-from shared.modules.logger import logger
+from shared.modules.logger import logger, warning, info
 
 bp = 10_000
 
@@ -65,16 +66,58 @@ class Client:
         else:
             return {c for c in contracts if c.expiry >= as_of or c.issue_date <= as_of}
 
-    def history(self, symbols: Iterable[Union[Equity, OptionContract]], start: datetime.date, end: datetime.date, resolution: Resolution.minute, tick_type: TickType.quote, security_type) -> Dict[str, pd.DataFrame]:
-        """
-        This is fairly slow when reading quotes, sec resolution. Can mp over files ideally an open each zip file only once.
-        """
+    def get_zip_paths(self,
+                      symbols: Iterable[Security],
+                      tick_type: TickType,
+                      resolution: Resolution,
+                      security_type: SecurityType,
+                      start: datetime.date,
+                      end: datetime.date
+                      ) -> List[Path]:
         from options.helper import is_holiday  # local to avoid circular import
 
-        if resolution in (Resolution.hour, Resolution.daily):
-            return self.history_hour_day(symbols, start, end, resolution, tick_type, security_type)
+        out = []
+        if start > end:
+            warning.warn('Start date cannot be greater than end date')
+            return out
 
-        output = {}
+        for symbol in symbols:
+            if isinstance(symbol, Equity) and tick_type == TickType.quote and resolution in (Resolution.daily, Resolution.hour):
+                raise ValueError('There is no quote equity data for daily or hourly resolution.')
+
+            for dt in pd.date_range(start, end, freq='D'):
+                if is_holiday(dt):
+                    continue
+
+                underlying_folder = symbol.underlying_symbol.lower() if isinstance(symbol, OptionContract) else str(symbol).lower()
+                zip_fn = symbol.zip_name(tick_type, resolution, dt)
+                file_full_path = Path(os.path.join(self.root, security_type, self.market, resolution, underlying_folder, zip_fn))
+
+                # Want to unzip each file only once, hence first collect all the csvs to be read per zip file
+                if os.path.exists(file_full_path):
+                    out.append(file_full_path)
+                else:
+                    logger.warning(f'Missing {file_full_path}. Not fetched or exchange holiday?')
+
+        return out
+
+
+    def get_csv_names_in_zip(self, zip_path: Path) -> List[str]:
+        with ZipFile(zip_path, 'r') as z:
+            return z.namelist()
+
+
+
+    def get_dct_path_csvs(self,
+                          symbols: Iterable[Union[Equity, OptionContract]],
+                          tick_type: TickType,
+                          resolution: Resolution,
+                          security_type: SecurityType,
+                          start: datetime.date,
+                          end: datetime.date
+                          ) -> Dict[Path, List[CsvNmSymDt]]:
+        from options.helper import is_holiday  # local to avoid circular import
+
         dct_path_csvs: Dict[Path, List[CsvNmSymDt]] = defaultdict(list)
 
         for symbol in symbols:
@@ -99,6 +142,20 @@ class Client:
                 else:
                     logger.warning(f'Missing {file_full_path}. Not fetched or exchange holiday?')
 
+        return dct_path_csvs
+
+    def history(self, symbols: Iterable[Union[Equity, OptionContract]], start: datetime.date, end: datetime.date, resolution: Resolution.minute, tick_type: TickType.quote, security_type) -> Dict[str, pd.DataFrame]:
+        """
+        This is fairly slow when reading quotes, sec resolution. Can mp over files ideally an open each zip file only once.
+        """
+        from options.helper import is_holiday  # local to avoid circular import
+
+        if resolution in (Resolution.hour, Resolution.daily):
+            return self.history_hour_day(symbols, start, end, resolution, tick_type, security_type)
+
+        output = {}
+        dct_path_csvs = self.get_dct_path_csvs(symbols, tick_type, resolution, security_type, start, end)
+
         # # This step can be parallelized
         # for file_full_path, csv_names in dct_path_csvs.items():
         #     result = read_option_csvs_from_zip(file_full_path, csv_names, symbol, dt, tick_type)
@@ -121,13 +178,23 @@ class Client:
         return output
 
     def date_present(self, symbol: Equity, date: datetime.date, security_type: SecurityType) -> bool:
-        resolution = Resolution.minute
+        resolution = Resolution.second
         underlying_folder = symbol.underlying_symbol.lower() if isinstance(symbol, OptionContract) else str(symbol).lower()
 
         zip_fn_trade = OptionContract.get_zip_name(str(symbol), TickType.trade, resolution, date) if security_type == SecurityType.option else symbol.zip_name(TickType.trade, resolution, date)
         file_full_path_trade = Path(os.path.join(self.root, security_type, self.market, resolution, underlying_folder, zip_fn_trade))
 
-        return os.path.exists(file_full_path_trade)
+        if not os.path.exists(file_full_path_trade):
+            return False
+
+        # Check whether there is any non-zero csv member inside...
+        if security_type == SecurityType.option:
+            with ZipFile(file_full_path_trade, 'r') as zipObj:
+                if all((o.file_size <= 0 for o in zipObj.infolist())):
+                    info(f'date_present(): All .csv empty in {file_full_path_trade}')
+                    return False
+
+        return True
 
     def history_hour_day(self, symbols: Iterable[Union[Equity, OptionContract]], start: datetime.date, end: datetime.date, resolution: Resolution.minute, tick_type: TickType.quote, security_type) -> Dict[str, pd.DataFrame]:
         output = {}

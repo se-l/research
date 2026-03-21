@@ -33,8 +33,10 @@ class OptionContract(Security):
 
     @classmethod
     def from_filename(cls, filename: str, issue_date=None):
-        if filename[:8].isdigit():  # Minute: 20230627_akam_minute_quote_american_put_1800000_20240119.csv"
+        if filename.count('_') == 7 and filename[:8].isdigit():  # Minute: 20230627_akam_minute_quote_american_put_1800000_20240119.csv"
             dt, symbol, resolution, tick_type, option_style, option_right, strike, expiry = filename.split('.')[0].split('_')
+        elif filename.count('_') == 4:  # 'fdx_american_call_2200000_20241115'
+            symbol, option_style, option_right, strike, expiry = filename.split('_')
         else:  # Daily: are_quote_american_put_1950000_20230721.csv
             symbol, tick_type, option_style, option_right, strike, expiry = filename.split('.')[0].split('_')
         expiry = datetime.datetime.strptime(expiry, '%Y%m%d').date()
@@ -76,8 +78,12 @@ class OptionContract(Security):
     @staticmethod
     def get_zip_name(underlying_symbol: str, tick_type: TickType, resolution: Resolution, date: datetime.date):
         if resolution in (Resolution.daily, Resolution.hour):
+            if tick_type in (TickType.iv_quote, TickType.iv_trade):
+                return f'{underlying_symbol}_{date.year}_{tick_type.split("_")[1]}_american_iv.zip'.lower()
             return f'{underlying_symbol}_{date.year}_{tick_type}_american.zip'.lower()
         else:
+            if tick_type in (TickType.iv_quote, TickType.iv_trade):
+                return f'{date.strftime(dt_fmt_ymd)}_{tick_type.split("_")[1]}_american_iv.zip'.lower()
             return f'{date.strftime(dt_fmt_ymd)}_{tick_type}_american.zip'.lower()
 
     def ib_symbol(self):

@@ -1,5 +1,8 @@
 import os
 import webbrowser
+from dataclasses import dataclass
+from typing import Any
+
 import pandas as pd
 import numpy as np
 import plotly.graph_objs as go
@@ -11,6 +14,11 @@ from plotly.subplots import make_subplots
 
 from options.helper import load, iv_of_expiry, client
 
+@dataclass
+class Trace:
+    trace: Any
+    row: int
+    col: int
 
 def plot_iv_cones(implied_volatility, cones, confidence_levels):
     # Create the plotly figure

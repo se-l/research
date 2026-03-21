@@ -11,10 +11,10 @@ import signal
 
 from scipy.stats import t
 from multiprocessing import Process, Queue
-from typing import Tuple, List
+from typing import Tuple, List, Any, Dict
 from pprint import pprint
 from pyomo.environ import ConcreteModel, SolverFactory, Constraint
-from options.helper import apply_ds_ret_weights, cache_to_disk
+from options.helper import apply_ds_ret_weights, cache_to_disk, get_density_for_bimodal_t_dist
 from options.typess.earnings_config import EarningsConfig
 from options.typess.option import Option
 from options.typess.portfolio import Portfolio
@@ -35,12 +35,13 @@ def derive_portfolio_milnp(
         m_dnlv01_buy: np.ndarray,
         m_dnlv01_sell: np.ndarray,
         cfg: EarningsConfig,
-        pdf_t_params=(3.5983921085778388, 0.370699060063924, 17.868437182218727),
+        pdf_t_params= (2.46172191,  1.41911933, -0.27650936,  4.2197843),
         weight_max_t_curve=5,
         f_weight_ds=None,
         pf: Portfolio = None,
         tee=True,
-        weight_wing_lift: float = 0.0
+        weight_wing_lift: float = 0.0,
+        upward_sloping_wings: bool = False
 ) -> PfMilnpResult:
     """
         Define an objective function   d NLV = -f(T, K, right)
@@ -51,7 +52,7 @@ def derive_portfolio_milnp(
         SLSQP.
         Variables: Assuming we want to find an optimal pf consisting of 20 options. The NLV of each call/put can be expressed as some
         differentiable function of strike K.
-        The the solver could received l-expiries (eg 10) * 2-right variables * 3-quantity (1, 0, -1). Starting guess is strike close to moneyness 1.
+        The solver could receive l-expiries (eg 10) * 2-right variables * 3-quantity (1, 0, -1). Starting guess is strike close to moneyness 1.
         So the objective function takes in 60 variables and returns the sum of the NLV of the portfolio.
         Constraints:
             Total abs(quantity) <= : parameter
@@ -78,7 +79,7 @@ def derive_portfolio_milnp(
 
     # Constants T curve related
     v_ds_pct = [100 * (x - 1) for x in cfg.v_ds_ret]
-    y = t.pdf(v_ds_pct, *pdf_t_params)
+    y = get_density_for_bimodal_t_dist(np.array(v_ds_pct), *pdf_t_params)
     y_scaled = y / max(y)
     i_ds_eq_0 = list(cfg.v_ds_ret).index(1)
 
@@ -135,9 +136,10 @@ def derive_portfolio_milnp(
         m.cons_t_curve.add(expr=m.nlv_mn_t_curve[i] >= m.v_var_nlv_lt_t_curve[i])
 
     # Upward sloping wings. Not up to optimization. A hard constraint
-    m.cons_wings = pyo.ConstraintList()
-    m.cons_wings.add(m.t[0] >= m.t[1])
-    m.cons_wings.add(m.t[-1] >= m.t[-2])
+    if upward_sloping_wings:
+        m.cons_wings = pyo.ConstraintList()
+        m.cons_wings.add(m.t[0] >= m.t[1])
+        m.cons_wings.add(m.t[-1] >= m.t[-2])
 
     # Existing Portfolio
     if pf:  # If any existing portfolio is provided, add constraints

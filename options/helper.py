@@ -1,46 +1,52 @@
 import hashlib
 import json
 import operator
-import os
 import pickle
 import traceback
 
 import QuantLib as ql
 import pandas as pd
-import numpy as np
 import multiprocessing
 import matplotlib.pyplot as plt
+import sys, os
+import numpy as np
+import merlin
+# import py_vollib_vectorized
 
+from time import perf_counter
 from hashlib import sha256
 from datetime import date, datetime, time, timedelta
 from functools import reduce, lru_cache
-from typing import List, Union, Tuple, Dict
+from typing import List, Union, Tuple, Dict, Iterable
 from importlib import reload
 from itertools import chain
 
-import py_vollib.black_scholes_merton.implied_volatility
-import py_vollib_vectorized
-
-from arbitragerepair import constraints, repair
+# from arbitragerepair import constraints, repair
 from matplotlib import gridspec
+from numpy._typing import NDArray
+from scipy.interpolate import PchipInterpolator
 from scipy.interpolate.interpnd import NDInterpolatorBase
 from scipy.signal import savgol_filter
 from sklearn.linear_model import LinearRegression
 from scipy.optimize import curve_fit
 from sklearn.metrics import r2_score
+from scipy.stats import t
 
 import options.client as mClient
-from options.typess.enums import Resolution, TickType, SecurityType, GreeksEuOption, SkewMeasure, OptionRight
-from options.typess.holding import Holding
+from options.typess.dividend import get_dividends, Dividend
+from options.typess.enums import Resolution, TickType, SecurityType, GreeksEuOption, SkewMeasure, OptionRight, OptionPricingModel
+from options.typess.option import Option, Style
 from options.typess.option_contract import OptionContract
 from options.typess.equity import Equity
 from options.typess.option_frame import OptionFrame
 from options.typess.portfolio import Portfolio
 from options.typess.security import Security
-from shared.constants import EarningsPreSessionDates, DividendYield, DiscountRateMarket
+from shared.constants import DividendYield, DiscountRateMarket
 from shared.modules.logger import logger, warning
-
+from functools import wraps
+from time import perf_counter
 from shared.paths import Paths
+from shared.yield_curve import YieldCurve, ZeroCurveData
 
 reload(mClient)
 client = mClient.Client()
@@ -464,16 +470,45 @@ def enrich_atm_iv_by_right(df, col_nm='atm_iv_by_right'):
                 df.loc[sss_df.index, col_nm] = v_atm_iv
 
 
+# def is_subprocess():
+#     # Get the current process
+#     current_process = psutil.Process(os.getpid())
+#
+#     # Check if the current process has a parent process
+#     parent_process = current_process.parent()
+#
+#     return parent_process is not None
+
+
 @lru_cache(maxsize=2**10)
 def get_tenor(dt: date, calculation_dt: Union[date, ql.Date]) -> float:
-    if isinstance(dt, pd.Timestamp):
-        return ((dt.date() - calculation_dt).days + 1) / 365
-    elif isinstance(dt, (datetime, date)):
-        return ((dt - calculation_dt).days + 1) / 365
-    elif isinstance(dt, ql.Date):
-        return ((dt.to_date() - calculation_dt).days + 1) / 365
+    """
+    Presuming able to send exercise notice at about 17:30 on exercise day.
+    If calculation_dt is a date only, presume it's 9:30 market open time.
+    """
+    if isinstance(calculation_dt, datetime):
+        start_dt = calculation_dt
+    elif isinstance(calculation_dt, date):
+        start_dt = datetime(calculation_dt.year, calculation_dt.month, calculation_dt.day)
+    elif isinstance(calculation_dt, ql.Date):
+        calc_dt = calculation_dt.to_date()
+        start_dt = datetime(calc_dt.year, calc_dt.month, calc_dt.day)
     else:
-        raise Exception('Unsupported type')
+        raise Exception('Unsupported type - calculation_dt')
+    start = date_to_sod(start_dt)
+
+    if isinstance(dt, pd.Timestamp):
+        end_dt = datetime(dt.date().year, dt.date().month, dt.date().day)
+    elif isinstance(dt, date):
+        end_dt = datetime(dt.year, dt.month, dt.day)
+    elif isinstance(dt, datetime):
+        end_dt = dt
+    elif isinstance(dt, ql.Date):
+        end_dt = datetime(dt.to_date().year, dt.to_date().month, dt.to_date().day)
+    else:
+        raise Exception('Unsupported type tenor date')
+    end = end_dt + timedelta(hours=17, minutes=30)
+    return ((end - start).total_seconds() / (60**2*24)) / 365
 
 
 def timedelta2days(td: timedelta) -> int:
@@ -483,18 +518,23 @@ def timedelta2days(td: timedelta) -> int:
 to_days = np.frompyfunc(timedelta2days, 1, 1)
 
 
-def get_v_tenor(dt: np.ndarray[date], calculation_dt: np.ndarray[Union[date, ql.Date]]) -> np.ndarray:
+def get_v_tenor(dt: NDArray[datetime], calculation_dt: datetime | NDArray[datetime]) -> NDArray[float]:
     if dt is None or len(dt) == 0:
         return np.array([])
-    return ((to_days((dt - calculation_dt)) + 1) / 365).astype(float)
+
+    assert dt is not None and isinstance(dt[0], date), f'Only accepting datetime, not date'
+
+    assert isinstance(calculation_dt, datetime) or isinstance(calculation_dt, np.ndarray) and isinstance(calculation_dt[0], datetime), f'Only accepting datetime, not date'
+
+    return np.array([el.total_seconds() / (365 * 24 * 60**2) for el in (dt - calculation_dt)])
 
 
 def get_v_tenor_from_index(df):
-    v_calc_date = np.array(list(map(lambda x: x.date(), df.index.get_level_values('ts').to_pydatetime())))
-    return get_v_tenor(df.index.get_level_values('expiry').values, v_calc_date)
+    v_ts = np.array(df.index.get_level_values('ts').to_pydatetime())
+    return get_v_tenor(np.array([date_to_eod_expiry(dt) for dt in df.index.get_level_values('expiry').values]), v_ts)
 
 
-def get_v_tenor_dt(tenor: np.ndarray[float], calculation_dt: np.ndarray[Union[date, ql.Date]]) -> List[date]:
+def get_v_tenor_dt(tenor: NDArray[np.float64], calculation_dt: NDArray[Union[date, ql.Date]]) -> List[date]:
     if tenor is None or len(tenor) == 0:
         return []
     return [(calculation_dt + timedelta(days=365 * t)).date() - timedelta(days=1) for t in tenor]
@@ -504,24 +544,241 @@ def get_moneyness(strike, spot) -> float:
     return strike / spot
 
 
-def get_moneyness_fwd(equity: Equity, strike: float, spot: float, tenor: float) -> float:
+def get_moneyness_fwd_continuous(equity: Equity, strike: float, spot: float, tenor: float) -> float:
     """K/Se(r−δ)τ"""
     rate = DiscountRateMarket
     dividend_yield = get_dividend_yield(equity)
     net_yield = rate - dividend_yield
 
-    strike_fwd = strike * np.exp(net_yield * tenor)
-    moneyness_fwd = strike_fwd / spot
+    spot_fwd = spot * np.exp(net_yield * tenor)
+    moneyness_fwd = strike / spot_fwd
     return moneyness_fwd
 
+def add_year_fraction(t0: datetime, tenor: float | Iterable[float]) -> datetime | List[datetime]:
+    if np.isscalar(tenor):
+        return t0 + timedelta(days=365 * tenor)
+    tenor = np.asarray(tenor, dtype=float)
+    return [t0 + timedelta(days=d) for d in (365 * tenor)]
+
+def date_to_sod(dt: date) -> datetime:
+    if isinstance(dt, datetime):
+        return dt
+    return datetime(year=dt.year, month=dt.month, day=dt.day) + timedelta(hours=9, minutes=30)
+
+def date_to_eod_expiry(dt: date, time=timedelta(hours=17, minutes=30)) -> datetime:
+    if isinstance(dt, datetime):
+        return dt
+    return datetime(year=dt.year, month=dt.month, day=dt.day) + time
+
+def _yearfrac_act365(t0: datetime, t1: date | datetime | NDArray[datetime]) -> float | NDArray[np.float64]:
+    """
+    Act/365F year fraction.
+    Supports scalar dates and numpy arrays of python `date` objects.
+    """
+    if isinstance(t1, (datetime, date)):
+        return (date_to_sod(t1) - t0).days / 365.0
+    return np.array([(date_to_sod(d) - t0).days / 365.0 for d in t1], dtype=float)
+
+
+# def _interp_zero_rate(curve, t: NDArray[np.float64]) -> NDArray[np.float64]:
+#     """
+#     Linear interpolation of zero rates on the provided curve times.
+#     Extrapolates flat beyond endpoints.
+#     """
+#     times = np.asarray(curve.times, dtype=float)
+#     rates = np.asarray(curve.rates, dtype=float)
+#     if times.size == 0:
+#         # Fallback (should be rare): flat single rate
+#         return np.full_like(t, float(DiscountRateMarket), dtype=float)
+#
+#     return np.interp(t, times, rates, left=rates[0], right=rates[-1])
+
+def _interp_zero_rate(curve, t: NDArray[np.float64]) -> NDArray[np.float64]:
+    """
+    Monotone, "convex-ish" interpolation via a shape-preserving cubic (PCHIP)
+    applied to the *log discount factor* (equivalently y(t)=r(t)*t for
+    continuously-compounded zero rates).
+
+    Why this works well for curves:
+      - Interpolating y(t)=r(t)*t avoids nasty oscillations in r(t)
+      - PCHIP is monotone-preserving (no overshoot), giving a smooth curve
+      - Discount factors remain well-behaved (positive), and the resulting
+        zero-rate curve is typically smooth and convex-looking if the inputs are.
+
+    Extrapolation: flat in zero-rate space beyond endpoints (same behavior as np.interp).
+    """
+    times = np.asarray(curve.times, dtype=np.float64)
+    rates = np.asarray(curve.rates, dtype=np.float64)
+
+    t = np.asarray(t, dtype=np.float64)
+
+    if times.size == 0:
+        return np.full_like(t, float(DiscountRateMarket), dtype=np.float64)
+
+    # If caller gives unsorted or duplicated times, make it safe.
+    order = np.argsort(times)
+    times = times[order]
+    rates = rates[order]
+
+    # Drop duplicate times (keep the last one after sorting)
+    if times.size >= 2:
+        uniq_mask = np.r_[times[1:] != times[:-1], True]
+        times = times[uniq_mask]
+        rates = rates[uniq_mask]
+
+    # Degenerate cases
+    if times.size == 1:
+        return np.full_like(t, float(rates[0]), dtype=np.float64)
+
+    # Flat extrapolation in *rate* space, like np.interp(left=..., right=...)
+    left_rate = float(rates[0])
+    right_rate = float(rates[-1])
+
+    out = np.empty_like(t, dtype=np.float64)
+
+    left = t <= times[0]
+    right = t >= times[-1]
+    mid = ~(left | right)
+
+    out[left] = left_rate
+    out[right] = right_rate
+
+    if np.any(mid):
+        tm = t[mid]
+
+        # Interpolate y(t) = r(t) * t (i.e., -log DF).
+        y = rates * times
+
+        pchip = PchipInterpolator(times, y, extrapolate=False)
+        ym = pchip(tm)
+
+        # Convert back to zero rate: r(t) = y(t) / t
+        # Avoid division by zero if tm contains 0.
+        out_mid = np.empty_like(tm, dtype=np.float64)
+        zero = tm == 0.0
+        out_mid[zero] = left_rate  # sensible limit if curve starts at 0
+        out_mid[~zero] = ym[~zero] / tm[~zero]
+
+        out[mid] = out_mid
+
+    return out
+
+def _discount_factor_from_zero(curve, t: NDArray[np.float64]) -> NDArray[np.float64]:
+    """
+    Discount factor P(0,t) from (approx) bond-equivalent / semi-annual-compounded zero rates:
+        P(0,t) = (1 + z(t)/2)^(-2t)
+    This matches the compounding convention implicitly used in `bootstrap_to_zero_rates`.
+    """
+    z = _interp_zero_rate(curve, t)
+    return (1.0 + z / 2.0) ** (-2.0 * t)
+
+
+def forward_from_curve_and_divs(
+    spot: NDArray[np.float64],
+    t0: datetime,
+    t1: NDArray[datetime],
+    yield_curve,
+    cash_dividends: List[Dividend] | None = None,
+    dividend_yield: float = 0.0,
+) -> NDArray[np.float64]:
+    """
+    Forward price with a zero curve + optional discrete cash dividends and/or continuous dividend yield q.
+
+    - With discrete dividends:
+        F(0,T) = (S0 - Σ PV(D_i)) / P(0,T),
+        PV(D_i) = D_i * P(0, t_i), for t_i in (t0, T].
+
+    - With continuous yield q (and no cash dividend schedule):
+        F(0,T) = S0 * exp(-qT) / P(0,T)
+
+    - With neither:
+        F(0,T) = S0 / P(0,T)
+    """
+    spot = np.asarray(spot, dtype=float)
+    t1 = np.asarray(t1, dtype=object)
+
+    T = _yearfrac_act365(t0, t1)  # year fractions from t0
+    P0T = _discount_factor_from_zero(yield_curve, np.asarray(T, dtype=float))
+    fwd = spot / P0T
+
+    # Discrete dividends take priority if provided (typical for US equities with known cash div schedule)
+    if cash_dividends:
+        pv_div = np.zeros_like(fwd, dtype=float)
+        for d in cash_dividends:
+            exd = d.ex_date
+            if not (t0.date() < exd):
+                continue
+            # only dividends with ex_date <= t1[i]
+            mask = np.array([exd <= dt.date() for dt in t1], dtype=bool)
+            if not np.any(mask):
+                continue
+            t_div = _yearfrac_act365(t0, exd)
+            P0div = _discount_factor_from_zero(yield_curve, np.array([float(t_div)], dtype=float))[0]
+            pv_div[mask] += float(d.amount) * P0div
+
+        fwd = (spot - pv_div) / P0T
+        return fwd
+
+    # Otherwise continuous dividend yield (if any)
+    if dividend_yield and float(dividend_yield) != 0.0:
+        fwd = (spot * np.exp(-float(dividend_yield) * np.asarray(T, dtype=float))) / P0T
+    return fwd
+
+
+def get_moneyness_fwd(
+        equity: Equity,
+        strike: NDArray[np.float64],
+        spot: NDArray[np.float64],
+        tenor: NDArray[np.float64],
+        t0: datetime | NDArray[datetime],
+        yield_curve_in: ZeroCurveData = None
+) -> NDArray[np.float64]:
+    """K/Se(r−δ)τ"""
+    if isinstance(t0, date) and not isinstance(t0, datetime):
+        raise NotImplementedError('Need a datetime. Assume 9:30 market open')
+
+    elif not isinstance(t0, (date, datetime)):  # assume it's iterable we group by
+        if not isinstance(t0[0], datetime):
+            raise NotImplementedError('Need a datetime. Assume 9:30 market open')
+
+    if not isinstance(t0, (date, datetime)):  # assume it's iterable we group by
+        unique_dt, inv = np.unique(t0, return_inverse=True)  # kinda bad as tenors are datetime not, not grouped by date
+        mny_fwd = np.zeros_like(tenor)
+        for i, dt in enumerate(unique_dt):
+            ix = inv == i
+            mny_fwd[ix] = get_moneyness_fwd(
+                equity=equity,
+                strike=strike[ix],
+                spot=spot[ix],
+                tenor=tenor[ix],
+                t0=dt
+            )
+        return mny_fwd
+    else:
+        yield_curve = yield_curve_in or YieldCurve().get_zero_curve(t0)
+        t1 = add_year_fraction(t0, tenor)
+        cash_dividends: List[Dividend] = get_dividends(equity.symbol.upper(), t0)
+        div_yield = float(get_dividend_yield(equity)) if not cash_dividends else 0.0
+
+        spot_fwd = forward_from_curve_and_divs(
+            spot=spot,
+            t0=t0,
+            t1=np.asarray(t1, dtype=object),
+            yield_curve=yield_curve,
+            cash_dividends=cash_dividends,
+            dividend_yield=div_yield,
+        )
+
+        return strike / spot_fwd
 
 def get_moneyness_fwd_ln(equity: Equity,
                          strike: float | np.ndarray,
                          spot: float | np.ndarray,
-                         tenor: float | np.ndarray
+                         tenor: float | np.ndarray,
+                         t0: date,
                          ) -> float | np.ndarray:
     """k = log(K/Se(r−δ)τ)"""
-    return np.log(get_moneyness_fwd(equity, strike, spot, tenor))
+    return np.log(get_moneyness_fwd(equity, strike, spot, tenor, t0))
 
 
 def interpolate_pt(interp: NDInterpolatorBase, x: float, y: float) -> np.array:
@@ -596,6 +853,92 @@ def calc_iv_for_repair(price, priceUnderlying, start, option_right, maturityDate
 #     # print(eu_option.impliedVolatility(price, bsmProcess))
 #     return eu_option.impliedVolatility(price, bsmProcess)
 
+def FV(
+    s: NDArray[np.float64],
+    t0: date | NDArray[date],
+    t1: date | NDArray[date],
+    dividends: List[Dividend] = None,
+    yield_curve_in=None
+) -> float | NDArray[np.float64]:
+    """
+    Forward value using a *term structure* (zero curve), not a single flat rate.
+
+    If `yield_curve` is None and t0 is a scalar date, it is loaded via YieldCurve().get_zero_curve(t0).
+
+    Notes:
+    - Discrete dividends (if provided) are treated as cash amounts with PV discounted on the same curve.
+    - If no discrete dividends are provided, `dividend_yield` (q) can be used as continuous yield.
+    """
+    yield_curve = yield_curve_in or YieldCurve()
+    # Vectorize over multiple t0 dates by grouping (mirrors other functions in this module)
+    if not isinstance(t0, date):
+        t0_arr = np.asarray(t0, dtype=object)
+        t1_arr = np.asarray(t1, dtype=object)
+        s = np.asarray(s, dtype=float)
+
+        unique_dt, inv = np.unique(t0_arr, return_inverse=True)
+        out = np.zeros_like(s, dtype=float)
+        for i, dt in enumerate(unique_dt):
+            ix = inv == i
+            out[ix] = FV(
+                s=s[ix],
+                t0=dt,
+                t1=t1_arr[ix],
+                dividends=dividends,
+                yield_curve_in=yield_curve
+            )
+        return out
+
+    # Scalar t0
+    if yield_curve is None:
+        yield_curve = YieldCurve().get_zero_curve(t0)
+
+    s = np.asarray(s, dtype=float)
+    if isinstance(t1, date):
+        t1_arr = np.asarray([t1], dtype=object)
+        scalar_out = True
+    else:
+        t1_arr = np.asarray(t1, dtype=object)
+        scalar_out = False
+
+    fwd = forward_from_curve_and_divs(
+        spot=s if s.ndim > 0 else np.asarray([float(s)], dtype=float),
+        t0=t0,
+        t1=t1_arr,
+        yield_curve=yield_curve,
+        cash_dividends=dividends,
+    )
+
+    if scalar_out:
+        return float(fwd[0])
+    return fwd
+
+def FVOld(s: NDArray[np.float64], t0: date | NDArray[date], t1: date | NDArray[date], dividends: List[Dividend]=None) -> float | NDArray[np.float64]:
+    # Forward with discrete dividends: F = (S - sum_i(amt_i * exp(-r*t_i))) * exp(rT)
+    days = (t1 - t0).astype("timedelta64[D]").astype(np.int64)
+    T = days / 365.0
+
+    r = DiscountRateMarket
+    fwd = s * np.exp(r * T)
+
+    t0_arr = t0.astype("datetime64[D]")
+    t1_arr = t1.astype("datetime64[D]")
+
+    def subtract_div(amt: float, exd: date):
+        exd_dt = np.array(exd, dtype="datetime64[D]")
+        # Eligible where t0 <= exd < t1
+        elig = (t0_arr <= exd_dt) & (exd_dt < t1_arr)
+
+        if not np.any(elig):
+            return fwd
+        rem_days = (t1_arr[elig] - exd_dt).astype("timedelta64[D]").astype(np.int64)
+        fwd[elig] -= amt * np.exp(r * (rem_days / 365.0))
+        return fwd
+
+    for d in dividends:
+        fwd = subtract_div(float(d.amount), d.ex_date)
+
+    return fwd
 
 def create_vol_surface_mesh_from_heston_params(today, calendar, spot, v0, kappa, theta, rho, sigma,
                                                rates_curve_handle, dividend_curve_handle,
@@ -1110,15 +1453,16 @@ def ps_index2option_contract(ps: pd.Series, equity: Equity) -> OptionContract:
 #     return implied_volatility(ps[price_col], float(strike), expiry, ps[spot_column], right, ts.date(), calendar, day_count, rate, dividend)
 
 
-def df2iv(df: pd.DataFrame, price_col_nm: str, rate: float, dividend_yield: float, spot_col_nm: str = 'spot', tenor_col_nm='tenor', na2zero=True) -> np.ndarray:
+def df2iv(df: pd.DataFrame, price_col_nm: str, spot_col_nm: str = 'spot', tenor_col_nm='tenor', dividends: List[Dividend]=None, calculation_date: date | NDArray[date] = None, na2zero=True, equity: Equity=None) -> np.ndarray:
     v: np.ndarray = get_v_iv(
         p=df[price_col_nm].values,
         s=df[spot_col_nm].values,
         k=df.index.get_level_values('strike').astype(float).values,
         t=df[tenor_col_nm].values,
-        r=rate,
-        right=df.index.get_level_values('right').map({OptionRight.call: 'c', OptionRight.put: 'p'}).values,
-        q=dividend_yield,
+        v_is_call=df.index.get_level_values('right').map({OptionRight.call: 1, OptionRight.put: 0}).values,
+        dividends=dividends,
+        calculation_date=calculation_date,
+        equity=equity,
         )
     if na2zero:
         # This should be handled better by first checking which prices are below intrinsic value and only send remaining values here.
@@ -1126,8 +1470,64 @@ def df2iv(df: pd.DataFrame, price_col_nm: str, rate: float, dividend_yield: floa
     return v
 
 
-def get_v_iv(p: np.ndarray, s: np.ndarray, k: np.ndarray, t: np.ndarray, r: float, right: np.ndarray, q: float) -> np.ndarray:
-    return py_vollib_vectorized.vectorized_implied_volatility(p, s, k, t, r, right, q=q, model='black_scholes_merton', return_as='numpy')
+def get_v_iv(p: np.ndarray, s: np.ndarray, k: np.ndarray, t: np.ndarray, v_is_call: NDArray[int], dividends: List[Dividend] = None, calculation_date: date | NDArray[date]=None, yield_curve=None, equity: Equity=None) -> np.ndarray:
+    if not isinstance(calculation_date, date):
+        v = np.zeros_like(p)
+        unique_dt, inv = np.unique(calculation_date, return_inverse=True)
+        for i, dt in enumerate(unique_dt):
+            yield_curve = yield_curve or YieldCurve().get_zero_curve(dt)
+            div_amounts, div_times = dividends2amount_times(dividends=dividends, calculation_date=dt)
+
+            ix = inv == i
+            v[ix] = np.array(merlin.get_v_iv_fd_gpu(
+                prices=p[ix],
+                spots=s[ix],
+                strikes=k[ix],
+                tenors=t[ix],
+                v_is_call=v_is_call[ix],
+                rates_curve=yield_curve.rates,
+                rates_times=yield_curve.times,
+                div_amounts=div_amounts,
+                div_times=div_times,
+                max_iter=200
+            ))
+
+        return v
+    else:
+        yield_curve = yield_curve or YieldCurve().get_zero_curve(calculation_date, equity=equity)
+        div_amounts, div_times = dividends2amount_times(dividends=dividends, calculation_date=calculation_date)
+
+        return np.array(merlin.get_v_iv_fd_gpu(
+            prices=p,
+            spots=s,
+            strikes=k,
+            tenors=t,
+            v_is_call=v_is_call,
+            rates_curve=yield_curve.rates,
+            rates_times=yield_curve.times,
+            div_amounts=div_amounts,
+            div_times=div_times,
+            max_iter=200
+        ))
+
+
+def df2iv_european(df: pd.DataFrame, price_col_nm: str, rate: float, dividend_yield: float, spot_col_nm: str = 'spot', tenor_col_nm='tenor', na2zero=True) -> np.ndarray:
+    v: np.ndarray = get_v_iv_european(
+        p=df[price_col_nm].values,
+        s=df[spot_col_nm].values,
+        k=df.index.get_level_values('strike').astype(float).values,
+        t=df[tenor_col_nm].values,
+        r=rate,
+        rights=df.index.get_level_values('right').map({OptionRight.call: 'c', OptionRight.put: 'p'}).values,
+        q=dividend_yield,
+        )
+    if na2zero:
+        # This should be handled better by first checking which prices are below intrinsic value and only send remaining values here.
+        v[np.isnan(v)] = 0
+    return v
+
+def get_v_iv_european(p: np.ndarray, s: np.ndarray, k: np.ndarray, t: np.ndarray, r: float, rights: np.ndarray, q: float) -> np.ndarray:
+    return py_vollib_vectorized.vectorized_implied_volatility(p, s, k, t, r, rights, q=q, model='black_scholes_merton', return_as='numpy')
 
 
 def ps2npv(ps: pd.Series, iv_col: str, calendar, day_count, rate, dividend, spot_column='spot') -> float:
@@ -1220,15 +1620,26 @@ def add_trade_days(dt: date, n: int) -> date:
     return dt
 
 
-def n_trade_days(dt1: date, dt2: date) -> int:
+def n_trade_days_slow(dt1: date, dt2: date) -> int:
     """Absolute number of trade dates between dt1 and dt2 including each"""
     holidays = get_market_hours_holidays()
+    start, end = sorted((dt1, dt2))
     n = 0
-    for dt in pd.date_range(min((dt1, dt2)), max((dt1, dt2))):
+    for dt in pd.date_range(start, end):
         if dt.weekday() < 5 and dt.date() not in holidays:
             n += 1
     return n
 
+def n_trade_days(dt1: date, dt2: date) -> int:
+    """Absolute number of trade dates between dt1 and dt2, inclusive."""
+    start, end = sorted((dt1, dt2))
+    holidays = get_market_hours_holidays_arr()
+
+    return int(np.busday_count(
+        start,
+        end + timedelta(days=1),  # make end inclusive
+        holidays=holidays
+    ))
 
 def trade_days_between_dates(dt1: date, dt2: date) -> List[date]:
     holidays = get_market_hours_holidays()
@@ -1328,6 +1739,7 @@ def quotes2multi_index_df(quotes: Dict[OptionContract, pd.DataFrame]) -> pd.Data
 
 
 def get_dividend_yield(equity: str | Equity, ts: datetime.date = None) -> float:
+    # return 0
     key = (equity if isinstance(equity, str) else equity.symbol).upper()
     if key not in DividendYield:
         traceback_str = ''.join(traceback.format_stack())
@@ -1406,6 +1818,10 @@ def get_market_hours(market="Equity-usa-[*]"):
 def get_market_hours_holidays(market="Equity-usa-[*]") -> List[date]:
     return [datetime.strptime(d, '%m/%d/%Y').date() for d in get_market_hours(market)["holidays"]]
 
+@lru_cache(maxsize=1)
+def get_market_hours_holidays_arr(market="Equity-usa-[*]") -> np.ndarray:
+    return np.array(list(get_market_hours_holidays(market)), dtype="datetime64[D]")
+
 
 @lru_cache(maxsize=1)
 def get_market_hours_early_closes(market="Equity-usa-[*]") -> List[datetime]:
@@ -1424,14 +1840,12 @@ def get_pkl_cache_key(clear_prefix='', *args, **kwargs):
     b = clear_prefix.encode()
     _args = [convert_to_hashable(arg) for arg in args]
     _kwargs = {k: convert_to_hashable(v) for k, v in kwargs.items()}
+    _args += list(_kwargs.values())
     try:
-        b += pickle.dumps(_args)
+        b += pickle.dumps(_args, protocol=5)
     except Exception:
         b += str(_args).encode()
-    try:
-        b += pickle.dumps(_kwargs)
-    except Exception:
-        b += str(_kwargs).encode()
+    b += pickle.dumps({}, protocol=5)  # backwards compatible
 
     digest = hashlib.md5(b).hexdigest()
     fn = f'{clear_prefix}-{digest}.pkl'
@@ -1465,19 +1879,26 @@ def cache_to_disk(clear_prefix, root):
     return cache_object
 
 
-def timer(func):
+def timer(func=None, *, level="info"):
+    """
+    Usage:
+      @timer
+      def f(...): ...
+
+      @timer(logger=logger)   # your logger instance
+      def f(...): ...
+    """
+    if func is None:
+        return lambda f: timer(f, level=level)
+
+    @wraps(func)
     def wrapper(*args, **kwargs):
-        # nonlocal total
-        start = datetime.now()
-        result = func(*args, **kwargs)
-        duration = (datetime.now() - start).total_seconds()
-        # total += duration
-        print(f"Execution time: {duration:.2f} seconds")
-        return result
-
-    # total = 0
+        t0 = perf_counter()
+        try:
+            return func(*args, **kwargs)
+        finally:
+            logger.info(f"{func.__qualname__} executed in {perf_counter() - t0:.3f}s")
     return wrapper
-
 
 def security_from_symbol(symbol: str, calc_date: date) -> Security:
     from options.typess.option import Option
@@ -1495,6 +1916,9 @@ def exclude_outlier_quotes(df: pd.DataFrame, pf: Portfolio, equity: Equity) -> p
     pd.options.display.max_columns = 8
     # removing nonsense rows, may contain a holding. Keep but log it.
     conditions = []
+    if any((c in df.columns for c in ('bid_close', 'ask_close'))):
+        conditions.append((df['ask_close'].isna()))
+        conditions.append((df['bid_close'].isna()))
     if all((c in df.columns for c in ('ask_iv', 'bid_iv'))):
         conditions.append((df['ask_iv'] < df['bid_iv']))
     if 'ask_iv' in df.columns:
@@ -1510,22 +1934,366 @@ def exclude_outlier_quotes(df: pd.DataFrame, pf: Portfolio, equity: Equity) -> p
     if len(df_outlier) == 0:
         return df
 
-    elif pf:
-        v_symbol = df_outlier.apply(lambda ps: ps_index2option_contract(ps, equity).ib_symbol(), axis=1)
-        v_holding_symbol = {h.symbol.upper() for h in pf.holdings}
-        df_outlier = df_outlier[~v_symbol.isin(v_holding_symbol)]
-        warning(f'''# Data Issues={len(df_outlier)}: {df_outlier[['ask_iv', 'mid_iv', 'bid_iv', 'tenor']]}''')
-        return df.loc[df.index.difference(df_outlier.index)]
+    # elif pf:
+    #     # Excluding holdings from outlier removal.
+    #     v_symbol = df_outlier.apply(lambda ps: ps_index2option_contract(ps, equity).ib_symbol(), axis=1)
+    #     v_holding_symbol = {h.symbol.upper() for h in pf.holdings}
+    #     df_outlier = df_outlier[~v_symbol.isin(v_holding_symbol)]
+    #     # warning(f'''# Data Issues={len(df_outlier)}: {df_outlier[['ask_iv', 'mid_iv', 'bid_iv', 'tenor']]}''')
+    #     warning(f'''# Data Issues={len(df_outlier)}''')
+    #     return df.loc[df.index.difference(df_outlier.index)]
+    # else:
 
-    else:
-        warning(f'''# Data Issues={len(df_outlier)}: {df_outlier[['ask_iv', 'mid_iv', 'bid_iv', 'tenor']]}''')
-        return df.loc[df.index.difference(df_outlier.index)]
+    warning(f'''# Data Issues={len(df_outlier)}''')
+    # warning(f'''# Data Issues={len(df_outlier)}: {df_outlier[['ask_iv', 'mid_iv', 'bid_iv', 'tenor']]}''')
+    return df.loc[df.index.difference(df_outlier.index)]
+
+
+def get_density_for_bimodal_t_dist(returns: np.ndarray, dx, a, b, c):
+    return (t.pdf(returns + dx, a, b, c) + t.pdf(returns - dx, a, b, c)) / 2
+
+
+def get_dividend_amount_times(ticker: str, calculation_date: date) -> Tuple[List[float], List[float]]:
+    dividends = get_dividends(ticker.upper(), calculation_date, date(2030, 1, 1))
+    return (
+        [d.amount for d in dividends],
+        [((d.ex_date - calculation_date).days + 1) / 365 for d in dividends]
+    )
+
+def dividends2amount_times(dividends: List[Dividend], calculation_date: date) -> Tuple[List[float], List[float]]:
+    return (
+        [d.amount for d in dividends],
+        [((d.ex_date - calculation_date).days + 1) / 365 for d in dividends]
+    )
+
+
+def perf_test_v_iv_fd_cuda(ticker='DAL'):
+    print("Loaded:", merlin)
+    # ----------------- synthetic test data (1,000 options) -----------------
+    n = 100_000
+    rng = np.random.default_rng(42)
+
+    p = rng.uniform(0.5, 8.0, n).astype(np.float64)  # option prices
+    s = rng.uniform(50.0, 150.0, n).astype(np.float64)  # spots
+    k = rng.uniform(50.0, 150.0, n).astype(np.float64)  # strikes
+    t = rng.uniform(0.05, 1.5, n).astype(np.float64)  # tenors (years)
+    r = 0.0435  # flat risk-free rate
+    right = rng.choice(['c', 'p'], size=n)  # calls/puts
+    n_steps = 200  # tree steps
+    dividends = get_dividends(ticker, date(2024, 1, 1), date(2028, 1, 1))
+    evaluation_date = date(2023, 1, 1)
+
+    # Example dividend schedule: 1 cash dividend for each option at 0.25*T with amount 0.5
+    div_amounts = np.array([d.amount for d in dividends], dtype=np.float64)
+    div_times = np.array([(d.ex_date - evaluation_date).days / 365 for d in dividends], dtype=np.float64)
+
+    # Define rate curve: rates at different time points
+    r_curve = [r, r, r, r, r, r, r, r]  # Rates
+    time_points = [0.0, 0.25, 0.5, 1.0, 2.0, 3, 4, 5]  # Time points (years)
+
+    # Timed run
+    t0 = perf_counter()
+    # ivs = merlin.get_v_iv_fd_cuda(
+    #     prices=p,
+    #     spots=s,
+    #     strikes=k,
+    #     tenors=t,
+    #     v_is_call=[1 if s['right'] == 'call' else 0 for s in samples],
+    #     rates_curve=yield_curve.rates,
+    #     rates_times=yield_curve.times,
+    #     div_amounts=div_amounts,
+    #     div_times=div_times,
+    # )
+
+    # Timed run
+    t0 = perf_counter()
+    ivs = merlin.get_v_iv_fd_with_term_structure(
+        prices=p,
+        spots=s,
+        strikes=k,
+        tenors=t,
+        rights=right,
+        n_steps=n_steps,
+        div_amounts=div_amounts,
+        div_times=div_times,
+        r_curve=r_curve,  # Vector of rates
+        time_points=time_points,  # Corresponding time points
+    )
+
+    dt = perf_counter() - t0
+
+    print(f"get_v_iv_fd Computed {n} American IVs in {dt:.3f} s; mean IV={np.nanmean(ivs):.4f}")
+
+
+def samples_to_reconcile_ql_cuda_option_pricing():
+    """
+    Generate test samples covering:
+    - Put/call: 2 options
+    - Tenor: short (0.08 years ~1 month), medium (0.25 years ~3 months), far (1.0 years)
+    - Moneyness: OTM, ATM, ITM
+    Total: 2 × 3 × 3 = 18 samples
+    """
+    import numpy as np
+    from datetime import date
+
+    # Base parameters
+    spot = 100.0
+    price = 15
+    r = 0.0435  # 5% risk-free rate
+    calc_date = date(2023, 1, 15)
+
+    # Tenor definitions
+    tenors = {
+        'short': calc_date + timedelta(days=28),
+        'medium': calc_date + timedelta(days=28*3),
+        'far': calc_date + timedelta(days=28*12),
+    }
+
+    # Strike definitions (moneyness relative to forward)
+    # Forward = S * exp((r-q)*T)
+    def get_strikes(tenor):
+        forward = spot * np.exp(r * tenor)
+        return {
+            'OTM_call': forward * 1.10,  # 10% OTM for calls
+            'ATM': forward,  # At-the-money forward
+            'ITM_call': forward * 0.90,  # 10% ITM for calls
+            'OTM_put': forward * 0.90,  # 10% OTM for puts (same as ITM call)
+            'ITM_put': forward * 1.10  # 10% ITM for puts (same as OTM call)
+        }
+
+    samples = []
+    sample_id = 1
+
+    # Generate all combinations
+    for tenor_name, expiry in tenors.items():
+        tenor_val = (expiry - calc_date).days / 365
+        strikes = get_strikes(tenor_val)
+
+        # Calls: OTM, ATM, ITM
+        for moneyness in ['OTM', 'ATM', 'ITM']:
+            if moneyness == 'OTM':
+                strike = strikes['OTM_call']
+            elif moneyness == 'ATM':
+                strike = strikes['ATM']
+            else:  # ITM
+                strike = strikes['ITM_call']
+
+            samples.append({
+                'id': sample_id,
+                'price': price,
+                'right': 'call',
+                'tenor_name': tenor_name,
+                'tenor': tenor_val,
+                'expiry': expiry,
+                'moneyness': moneyness,
+                'spot': spot,
+                'strike': strike,
+                'rate': r,
+                'calc_date': calc_date,
+                'description': f"Call {tenor_name} {moneyness}"
+            })
+            sample_id += 1
+
+        # Puts: OTM, ATM, ITM
+        for moneyness in ['OTM', 'ATM', 'ITM']:
+            if moneyness == 'OTM':
+                strike = strikes['OTM_put']
+            elif moneyness == 'ATM':
+                strike = strikes['ATM']
+            else:  # ITM
+                strike = strikes['ITM_put']
+
+            samples.append({
+                'id': sample_id,
+                'price': price,
+                'right': 'put',
+                'tenor_name': tenor_name,
+                'tenor': tenor_val,
+                'expiry': expiry,
+                'moneyness': moneyness,
+                'spot': spot,
+                'strike': strike,
+                'rate': r,
+                'calc_date': calc_date,
+                'description': f"Put {tenor_name} {moneyness}"
+            })
+            sample_id += 1
+
+    # Print summary table
+    print("Test Samples for QuantLib vs CUDA Reconciliation")
+    print("=" * 60)
+    print(f"{'ID':<3} {'Type':<4} {'Tenor':<8} {'Money':<5} {'Strike':<7} {'Spot':<5} {'Vol':<5}")
+    print("-" * 60)
+
+    for sample in samples:
+        print(f"{sample['id']:<3} {sample['right']:<4} "
+              f"{sample['tenor_name']:<8} {sample['moneyness']:<5} "
+              f"{sample['strike']:<7.2f} {sample['spot']:<5.0f} "
+              )
+
+    return samples
+
+def reconcile_ql_cuda_option_pricing(ticker='DAL'):
+    samples = samples_to_reconcile_ql_cuda_option_pricing()
+    assert len({s['calc_date'] for s in samples}) == 1
+    assert len({s['rate'] for s in samples}) == 1
+    calculation_date = samples[0]['calc_date']
+    r = samples[0]['rate']
+    dividends = get_dividends(ticker, calculation_date, date(2028, 1, 1))
+
+    yield_curve = YieldCurve().get_zero_curve(calculation_date)
+    # Example dividend schedule: 1 cash dividend for each option at 0.25*T with amount 0.5
+    div_amounts = np.array([d.amount for d in dividends], dtype=np.float64)
+    div_times = np.array([(d.ex_date - calculation_date).days / 365 for d in dividends], dtype=np.float64)
+
+    prices = [s['price'] for s in samples]
+    spots = [s['spot'] for s in samples]
+    strikes = [s['strike'] for s in samples]
+    tenors = [s['tenor'] for s in samples]  # issue here...
+
+    for s in samples:
+        c = OptionContract.from_ib_symbol(f"DAL   {s['expiry'].strftime('%y%m%d')}{s['right'][0].upper()}{int(s['strike'] * 1000):08d}")
+        calculationDate = s['calc_date']
+        s['target_iv'] = Option(c, calculationDate, option_constructor=ql.DividendVanillaOption, style=Style.AmericanDiv, dividends=dividends, optionPricingModel=OptionPricingModel.CoxRossRubinstein).iv(s['price'], s['spot'], calculationDate)
+
+    print("Calling CUDA implied volatility calculation...")
+    print("=" * 60)
+
+    # Define rate curve: rates at different time points
+    r_curve = [r, r, r, r, r, r, r, r]  # Rates
+    time_points = [0.0, 0.25, 0.5, 1.0, 2.0, 3, 4, 5]  # Time points (years)
+
+    cuda_ivs = merlin.get_v_iv_fd_cuda(
+        prices=prices,
+        spots=spots,
+        strikes=strikes,
+        tenors=tenors,
+        v_is_call=[1 if s['right'] == 'call' else 0 for s in samples],
+        rates_curve=yield_curve.rates,
+        rates_times=yield_curve.times,
+        div_amounts=div_amounts,
+        div_times=div_times,
+    )
+
+    # Add results back to samples
+    for i, sample in enumerate(samples):
+        sample['cuda_iv'] = cuda_ivs[i]
+        sample['iv_error'] = abs(cuda_ivs[i] - sample['target_iv'])
+        sample['iv_error_pct'] = sample['iv_error'] / sample['target_iv'] * 100
+
+    # Log results
+    print(f"{'ID':<3} {'Type':<4} {'Tenor':<8} {'Money':<5} {'Price':<8} {'Target':<7} {'CUDA':<7} {'Error':<7} {'Error%':<7}")
+    print("-" * 70)
+
+    total_abs_error = 0
+    max_error = 0
+
+    for sample in samples:
+        cuda_iv = sample['cuda_iv']
+        target_iv = sample['target_iv']
+        error = sample['iv_error']
+        error_pct = sample['iv_error_pct']
+
+        if not np.isnan(cuda_iv):
+            total_abs_error += error
+            if error > max_error:
+                max_error = error
+
+        print(f"{sample['id']:<3} {sample['right']:<4} "
+              f"{sample['tenor_name']:<8} {sample['moneyness']:<5} "
+              f"{sample['price']:<8.4f} {target_iv:<7.4f} "
+              f"{cuda_iv:<7.4f} {error:<7.4f} {error_pct:<7.2f}%")
+
+
+def reconcile_ql_fd_cuda_option_pricing(ticker='DAL'):
+    samples = samples_to_reconcile_ql_cuda_option_pricing()
+    assert len({s['calc_date'] for s in samples}) == 1
+    assert len({s['rate'] for s in samples}) == 1
+    calculation_date = samples[0]['calc_date']
+    r = samples[0]['rate']
+    dividends = get_dividends(ticker, calculation_date, date(2028, 1, 1))
+
+    # Example dividend schedule: 1 cash dividend for each option at 0.25*T with amount 0.5
+    div_amounts = np.array([d.amount for d in dividends], dtype=np.float64)
+    div_times = np.array([(d.ex_date - calculation_date).days / 365 for d in dividends], dtype=np.float64)
+
+    prices = [s['price'] for s in samples]
+    spots = [s['spot'] for s in samples]
+    strikes = [s['strike'] for s in samples]
+    tenors = [s['tenor'] for s in samples]  # issue here...
+    rights = [s['right'] for s in samples]
+
+    for s in samples:
+        c = OptionContract.from_ib_symbol(f"DAL   {s['expiry'].strftime('%y%m%d')}{s['right'][0].upper()}{int(s['strike'] * 1000):08d}")
+        calculationDate = s['calc_date']
+        s['target_iv'] = Option(c, calculationDate, option_constructor=ql.DividendVanillaOption, style=Style.AmericanDiv, dividends=dividends, optionPricingModel=OptionPricingModel.FdBlackScholesVanillaEngineDivSchedule).iv(s['price'], s['spot'], calculationDate)
+
+    print("Calling CUDA implied volatility calculation...")
+    print("=" * 60)
+
+    # Define rate curve: rates at different time points
+    r_curve = [r, r, r, r, r, r, r, r]  # Rates
+    time_points = [0.0, 0.25, 0.5, 1.0, 2.0, 3, 4, 5]  # Time points (years)
+
+    cuda_ivs = merlin.get_v_iv_fd_cuda(
+        prices=prices,
+        spots=spots,
+        strikes=strikes,
+        tenors=tenors,
+        v_is_call=[1 if s['right'] == 'call' else 0 for s in samples],
+        rates_curve=yield_curve.rates,
+        rates_times=yield_curve.times,
+        div_amounts=div_amounts,
+        div_times=div_times,
+    )
+
+    # Add results back to samples
+    for i, sample in enumerate(samples):
+        sample['cuda_iv'] = cuda_ivs[i]
+        sample['iv_error'] = abs(cuda_ivs[i] - sample['target_iv'])
+        sample['iv_error_pct'] = sample['iv_error'] / sample['target_iv'] * 100
+
+    # Log results
+    print(f"{'ID':<3} {'Type':<4} {'Tenor':<8} {'Money':<5} {'Price':<8} {'Target':<7} {'CUDA':<7} {'Error':<7} {'Error%':<7}")
+    print("-" * 70)
+
+    total_abs_error = 0
+    max_error = 0
+
+    for sample in samples:
+        cuda_iv = sample['cuda_iv']
+        target_iv = sample['target_iv']
+        error = sample['iv_error']
+        error_pct = sample['iv_error_pct']
+
+        if not np.isnan(cuda_iv):
+            total_abs_error += error
+            if error > max_error:
+                max_error = error
+
+        print(f"{sample['id']:<3} {sample['right']:<4} "
+              f"{sample['tenor_name']:<8} {sample['moneyness']:<5} "
+              f"{sample['price']:<8.4f} {target_iv:<7.4f} "
+              f"{cuda_iv:<7.4f} {error:<7.4f} {error_pct:<7.2f}%")
+
 
 
 if __name__ == '__main__':
-    print(n_trade_days(date(2024, 8, 30), date(2024, 9, 3)))
-    print(n_trade_days(date(2024, 8, 27), date(2024, 8, 30)))
-    print(n_trade_days(date(2024, 8, 27), date(2024, 8, 26)))
+    # Test FV with dividends calculation
+    start = date(2024, 1, 1)
+    end = date(2025, 12, 31)
+    # print(FV(100, start, end, dividends=get_dividends("FDX", start, end)))
+    # print(FV(100, start, end, dividends=[]))
+
+    print(get_moneyness_fwd(Equity("FDX"), 150, 100, 1, start))
+
+    # perf_test_v_iv_fd_cuda()
+    # reconcile_ql_cuda_option_pricing()
+    # reconcile_ql_fd_cuda_option_pricing()
+    # print(get_v_iv_fd([15], [100], [50], [1], 0.05, ['p'], ))
+    # print(n_trade_days(date(2024, 8, 30), date(2024, 9, 3)))
+    # print(n_trade_days(date(2024, 8, 27), date(2024, 8, 30)))
+    # print(n_trade_days(date(2024, 8, 27), date(2024, 8, 26)))
 #     print(add_trade_days(date(2024, 8, 27), 1))
 #     print(add_trade_days(date(2024, 8, 27), -1))
 #     print(add_trade_days(date(2024, 8, 30), 1))

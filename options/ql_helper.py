@@ -1,3 +1,5 @@
+from typing import Type
+
 import QuantLib as ql
 
 from options.typess.enums import OptionPricingModel
@@ -16,13 +18,15 @@ def get_bsm(calculation_date, spot_quote, hv_quote, rf_quote, dividend_rate_quot
     return ql.BlackScholesMertonProcess(ql.QuoteHandle(spot_quote), dividend_yield, flat_ts, flat_vol_ts)
 
 
-def engined_option(option, bsm_process, optionPricingModel: OptionPricingModel = OptionPricingModel.CoxRossRubinstein, steps=200) -> ql.VanillaOption:
-    binomial_engine = {
+def engined_option(option: ql.VanillaOption, bsm_process, optionPricingModel: Type[OptionPricingModel] = OptionPricingModel.CoxRossRubinstein, steps=200, dividend_schedule=[]) -> ql.VanillaOption:
+    pricing_engine: ql.PricingEngine = {
         OptionPricingModel.CoxRossRubinstein: lambda: ql.BinomialVanillaEngine(bsm_process, "crr", steps),
         OptionPricingModel.AnalyticEuropeanEngine: lambda: ql.AnalyticEuropeanEngine(bsm_process),
         OptionPricingModel.FdBlackScholesVanillaEngine: lambda: ql.FdBlackScholesVanillaEngine(bsm_process),
+        OptionPricingModel.FdBlackScholesVanillaEngineDivSchedule: lambda: ql.FdBlackScholesVanillaEngine(bsm_process, dividend_schedule),
+        OptionPricingModel.BaroneAdesiWhaleyApproximationEngine: lambda: ql.BaroneAdesiWhaleyApproximationEngine(bsm_process),
     }[optionPricingModel]()
-    option.setPricingEngine(binomial_engine)
+    option.setPricingEngine(pricing_engine)
     return option
 
 

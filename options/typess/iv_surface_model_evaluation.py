@@ -1,14 +1,10 @@
-from datetime import date
-
 import numpy as np
 import plotly.graph_objs as go
 
+from datetime import date
 from dataclasses import dataclass
-from itertools import chain
 from typing import Dict, Tuple
-from plotly.subplots import make_subplots
 from options.typess.enums import OptionRight
-from shared.plotting import show
 
 
 @dataclass
@@ -17,33 +13,31 @@ class IVSurfaceModelEvaluation:
     rmse_iv_right_tenor: Dict[Tuple[date, OptionRight], np.ndarray]
     rmse_price: float
     rmse_price_right_tenor: Dict[Tuple[date, OptionRight], np.ndarray]
-    rmse_pc_of_spread: float
-    rmse_pc_of_spread_right_tenor: Dict[Tuple[date, OptionRight], np.ndarray]
+    rmse_err_over_spread: float
+    rmse_err_over_spread_right_tenor: Dict[Tuple[date, OptionRight], np.ndarray]
 
     mae_iv: float
     mae_iv_right_tenor: Dict[Tuple[date, OptionRight], np.ndarray]
     mae_price: float
     mae_price_right_tenor: Dict[Tuple[date, OptionRight], np.ndarray]
-    mae_pc_of_spread: float
-    mae_pc_of_spread_right_tenor: Dict[Tuple[date, OptionRight], np.ndarray]
+    logit_err_price: float
+    logit_err_price_right_tenor: Dict[Tuple[date, OptionRight], np.ndarray]
+    mae_err_over_spread: float
+    mae_err_over_spread_right_tenor: Dict[Tuple[date, OptionRight], np.ndarray]
+    me_iv_by_mny: Dict[Tuple[date, OptionRight, float], np.ndarray]
+    me_price_by_mny: Dict[Tuple[date, OptionRight, float], np.ndarray]
 
-    def plot(self):
-        rights = [OptionRight.call, OptionRight.put]
-        fig = make_subplots(rows=7, cols=2, subplot_titles=['Across Surface', ''] + list(chain(*[[f'{right} {metric}' for right in rights] for metric in ['RMSE Price', 'MAE Price', 'RMSE IV', 'MAE IV', 'RMSE % of Spread', 'MAE % of Spread']])))
 
-        fig.add_trace(go.Bar(
-                x=['RMSE IV', 'MAE IV', 'RMSE Price', 'MAE Price', 'RMSE % of Spread', 'MAE % of Spread'],
-                y=[self.rmse_iv, self.mae_iv, self.rmse_price, self.mae_price, self.rmse_pc_of_spread, self.mae_pc_of_spread]
-            ),
-            row=1, col=1
+    def get_trace_error_metrics_bar(self):
+        bar_titles = [
+            # (self.rmse_iv, 'RMSE IV'),
+            (self.mae_iv, 'MAE IV'),
+            # (self.rmse_price, 'RMSE Price'),
+            (self.mae_price, 'MAE Price'),
+            # (self.rmse_err_over_spread, 'RMSE of err over spread'),
+            (self.mae_err_over_spread, 'MAE of err over spread'),
+        ]
+        return go.Bar(
+            x=[i[1] for i in bar_titles],
+            y=[i[0] for i in bar_titles],
         )
-
-        filter_dct = lambda dct, option_right: {k[0]: v for k, v in dct.items() if k[1] == option_right}
-
-        for col, right in enumerate(rights):
-            ix_col = col + 1
-            for row, attr in enumerate(['rmse_price_right_tenor', 'mae_price_right_tenor', 'rmse_iv_right_tenor', 'mae_iv_right_tenor', 'rmse_pc_of_spread_right_tenor', 'mae_pc_of_spread_right_tenor']):
-                ix_row = row + 2
-                dct = filter_dct(getattr(self, attr), right)
-                fig.add_trace(go.Scatter(x=list(dct.keys()), y=list(dct.values()), mode='markers', marker=dict(size=4), name=attr), row=ix_row, col=ix_col)
-        show(fig)

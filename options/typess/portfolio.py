@@ -37,6 +37,7 @@ class Portfolio(Mapping):
         if security not in self.holdings:
             self.holdings[security] = 0
         self.holdings[security] += quantity
+        return self
 
     def remove_security(self, security):
         self.holdings.pop(security) if security in self.holdings else None
@@ -97,13 +98,20 @@ class Portfolio(Mapping):
         return ', '.join([f'{str(o)}: {q}' for o, q in self.holdings.items()])
 
     def __copy__(self):
-        return Portfolio(self.holdings)
+        return Portfolio({**self.holdings})
 
     def __bool__(self):
         return bool(self.holdings)
 
 
 if __name__ == '__main__':
-    pf = Portfolio({Equity('AAPL'): 100})
+    sec = Equity('AAPL')
+    pf = Portfolio({sec: 100})
+    from copy import copy
+    pf2 = copy(pf)
+    assert id(pf.holdings) != id(pf2.holdings)
+    pf2.add_holding(sec, 100)
+    assert pf.holdings != pf2.holdings
+
     for h in pf:
         print(h)

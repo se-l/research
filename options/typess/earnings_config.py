@@ -31,9 +31,10 @@ class EarningsConfig:
     v_ds_ret: np.array = field(default_factory=lambda: np.linspace(0.8, 1.2, 21))
     portfolio: Portfolio = field(default_factory=lambda: Portfolio())
     run_solver: bool = True
-    solver_t_params: Tuple[float, float, float] = (3.9179707006161415, 0.32111046535136556, 18.689304507870794)
+    solver_t_params: Tuple[float, float, float, float] = (2.46172191,  1.41911933, -0.27650936,  4.2197843)
     n_contracts: int = 20
     earnings_iv_drop_regressor_model_name_version: str = 'f_20240918-215505'
+    var_neg_ratio: float = 1.5
 
     def __hash__(self):
         return hash((self.sym, self.release_date, self.plot, self.plot_last, self.max_scoped_options, self.resolution, self.seq_ret_threshold, self.min_tenor, self.max_tenor, self.moneyness_limits, self.abs_delta_limits, self.add_equity_holdings, self.ts_time_power, ','.join(str(k)+str(v) for k, v in self.portfolio.items()), self.run_solver, self.solver_t_params, self.n_contracts))

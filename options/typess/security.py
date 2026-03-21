@@ -26,7 +26,8 @@ class Security:
     def nlv(self, market_data: Dict['Security', 'SecurityDataSnap'], q: float = 1, scenario: Scenario | str = Scenario.mid): pass
 
     @abstractmethod
-    def __repr__(self): pass
+    def __repr__(self):
+        return self.symbol
 
     def __hash__(self):
         return self.__repr__()
@@ -45,6 +46,9 @@ class Security:
 
     def __str__(self):
         return self.__repr__()
+
+    def __eq__(self, other):
+        return self.__repr__() == other.__repr__()
 
 
 @dataclass

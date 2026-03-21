@@ -102,7 +102,9 @@ class CsvHeader:
 class OptionPricingModel:
     CoxRossRubinstein = 'CoxRossRubinstein'
     AnalyticEuropeanEngine = 'AnalyticEuropeanEngine'
+    FdBlackScholesVanillaEngineDivSchedule = 'FdBlackScholesVanillaEngineDivSchedule'
     FdBlackScholesVanillaEngine = 'FdBlackScholesVanillaEngine'
+    BaroneAdesiWhaleyApproximationEngine = 'BaroneAdesiWhaleyApproximationEngine'
 
 
 class SkewMeasure:

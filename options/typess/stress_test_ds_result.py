@@ -1,9 +1,12 @@
+import numpy as np
+import pandas as pd
+
 from dataclasses import dataclass, field
 from typing import Dict
-
 from options.typess.portfolio import Portfolio
 from options.typess.scenario import Scenario
 from options.typess.security import Security
+from shared.modules.logger import info
 
 
 @dataclass
@@ -13,7 +16,15 @@ class StressTestDsResult:
     delta_total: float
     delta_total_across_ds: float
     weighted_dnlv: float = 0
-    marginal_weighted_dnlv_by_holding: Dict[Security, float] = field(default_factory=dict)
+    marginal_utility_by_holding: Dict[Security, float] = field(default_factory=dict)
     total_objective: float = 0
-    marginal_scaled_objective_by_holding: Dict[Security, float] = field(default_factory=dict)
+    marginal_weighted_objective_by_holding: Dict[Security, float] = field(default_factory=dict)
     tag: Scenario | str = ''
+
+    def log_marginal_utility(self):
+        lst = [{'Security': h.symbol, 'Quantity': np.sign(h.quantity)*1, 'Utility': self.marginal_utility_by_holding.get(h.symbol)} for h in self.holdings.get_holdings()]
+        info(pd.DataFrame(lst))
+
+    def log_marginal_objective(self):
+        lst = [{'Security': h.symbol, 'Quantity': 1, 'Objective': self.marginal_weighted_objective_by_holding.get(h.symbol)} for h in self.holdings.get_holdings()]
+        info(pd.DataFrame(lst))

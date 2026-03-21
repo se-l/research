@@ -1,17 +1,18 @@
 import numpy as np
 import pandas as pd
-import QuantLib as ql
 import plotly.graph_objs as go
 
-from functools import partial
 from typing import Dict
 from itertools import chain
 from datetime import timedelta, datetime, time, date
+
 from plotly.subplots import make_subplots
 from options.client import Client
-from options.helper import quotes2multi_index_df, aewma, get_dividend_yield, df2iv, get_v_tenor_from_index
+from options.helper import quotes2multi_index_df, aewma, df2iv, get_v_tenor_from_index, get_dividend_amount_times
+from options.typess.dividend import get_dividends
 from options.typess.enums import TickType, Resolution, SecurityType, OptionRight
 from options.typess.equity import Equity
+from options.typess.option import get_delta_cuda, get_vega_cuda
 from options.typess.option_contract import OptionContract
 from shared.constants import DiscountRateMarket, EarningsPreSessionDates
 from shared.modules.logger import logger
@@ -63,30 +64,79 @@ def load_data(start: date, end: date, equity: Equity, take: int, resolution: Res
 
 def enrich(equity: Equity, df: pd.DataFrame):
     # Deriving implied volatilities
-    rate = DiscountRateMarket
-    dividend_yield = dividend = get_dividend_yield(equity)
-    calendar = ql.UnitedStates(ql.UnitedStates.NYSE)
-    day_count = ql.Actual365Fixed()
     df['tenor'] = get_v_tenor_from_index(df)
-    df['bid_iv'] = df2iv(df, price_col_nm='bid_close', rate=rate, dividend_yield=dividend_yield)
-    df['ask_iv'] = df2iv(df, price_col_nm='ask_close', rate=rate, dividend_yield=dividend_yield)
-    df['fill_price_iv'] = df2iv(df, price_col_nm='fill_price', rate=rate, dividend_yield=dividend_yield)
-    # df['bid_iv'] = df.apply(partial(ps2iv, price_col='bid_close', calendar=calendar, day_count=day_count, rate=rate, dividend=dividend), axis=1)
-    # df['ask_iv'] = df.apply(partial(ps2iv, price_col='ask_close', calendar=calendar, day_count=day_count, rate=rate, dividend=dividend), axis=1)
-    # df['fill_price_iv'] = df.apply(partial(ps2iv, price_col='fill_price', calendar=calendar, day_count=day_count, rate=rate, dividend=dividend), axis=1)
+
+    v_calc_date = np.array(list(map(lambda x: x.date(), df.index.get_level_values('ts').to_pydatetime())))
+    assert len(set(v_calc_date)) == 1, 'The current dividends function only allows a single calculation date'
+    dividends = get_dividends(equity.symbol.upper(), v_calc_date[0], v_calc_date[-1])
+
+    df['bid_iv'] = df2iv(df, price_col_nm='bid_close', dividends=dividends, calculation_date=v_calc_date)
+    df['ask_iv'] = df2iv(df, price_col_nm='ask_close', dividends=dividends, calculation_date=v_calc_date)
+    df['fill_price_iv'] = df2iv(df, price_col_nm='fill_price', dividends=dividends, calculation_date=v_calc_date)
+    # df['bid_iv'] = df.apply(partial(ps2iv, price_col='bid_close', calendar=calendar, day_count=day_count, dividend=dividend), axis=1)
+    # df['ask_iv'] = df.apply(partial(ps2iv, price_col='ask_close', calendar=calendar, day_count=day_count, dividend=dividend), axis=1)
+    # df['fill_price_iv'] = df.apply(partial(ps2iv, price_col='fill_price', calendar=calendar, day_count=day_count, dividend=dividend), axis=1)
 
     df['bid_iv_aewma'] = aewma(df['bid_iv'], 0.005, 0)  # no no. aewma follows delta/moneyness, not contracts
     df['ask_iv_aewma'] = aewma(df['ask_iv'], 0.005, 0)
 
     df['bid_delta'] = None
     df['ask_delta'] = None
-    for right, right_df in df.groupby(level='right'):
-        from options.typess.option import delta_call, delta_put
-        f = delta_call if right == OptionRight.call else delta_put
-        df.loc[right_df.index, 'bid_delta'] = f(right_df['spot'].values, right_df['strike_flt'].values, right_df['tenor'].values, right_df['bid_iv'].values, rate, dividend)
-        df.loc[right_df.index, 'ask_delta'] = f(right_df['spot'].values, right_df['strike_flt'].values, right_df['tenor'].values, right_df['ask_iv'].values, rate, dividend)
-    # df['bid_delta'] = df.apply(partial(ps2delta, iv_col='bid_iv', calendar=calendar, day_count=day_count, rate=rate, dividend=dividend), axis=1)
-    # df['ask_delta'] = df.apply(partial(ps2delta, iv_col='ask_iv', calendar=calendar, day_count=day_count, rate=rate, dividend=dividend), axis=1)
+
+    # for right, right_df in df.groupby(level='right'):
+    #     from options.typess.option import delta_call, delta_put
+    #     f = delta_call if right == OptionRight.call else delta_put
+    #     df.loc[right_df.index, 'bid_delta'] = f(right_df['spot'].values, right_df['strike_flt'].values, right_df['tenor'].values, right_df['bid_iv'].values, rate, dividend)
+    #     df.loc[right_df.index, 'ask_delta'] = f(right_df['spot'].values, right_df['strike_flt'].values, right_df['tenor'].values, right_df['ask_iv'].values, rate, dividend)
+    div_amounts, div_times = get_dividend_amount_times(equity.symbol.upper(), v_calc_date[0])
+
+    v_right = df.index.get_level_values('right').map({OptionRight.call: 'c', OptionRight.put: 'p'}).values
+    v_delta = get_delta_cuda(
+        s=df['spot'].values,
+        k=df['strike_flt'].values,
+        t=df['tenor'].values,
+        r=rate,
+        rights=v_right,
+        iv=df['mid_iv'].values,
+        div_amounts=div_amounts,
+        div_times=div_times,
+    )
+    v_vega = get_vega_cuda(
+        s=df['spot'].values,
+        k=df['strike_flt'].values,
+        t=df['tenor'].values,
+        r=rate,
+        rights=v_right,
+        iv=df['mid_iv'].values,
+        div_amounts=div_amounts,
+        div_times=div_times,
+    )
+    v_delta_bid, v_vega_bid = get_delta_cuda(
+        s=df['spot'].values,
+        k=df['strike_flt'].values,
+        t=df['tenor'].values,
+        r=rate,
+        rights=v_right,
+        iv=df['bid_iv'].values,
+        div_amounts=div_amounts,
+        div_times=div_times,
+    )
+    v_delta_ask = get_delta_cuda(
+        s=df['spot'].values,
+        k=df['strike_flt'].values,
+        t=df['tenor'].values,
+        r=rate,
+        rights=v_right,
+        iv=df['ask_iv'].values,
+        div_amounts=div_amounts,
+        div_times=div_times,
+    )
+
+    df['vega_mid_iv'] = 100 * v_vega
+    df['delta'] = v_delta
+    df['bid_delta'] = v_delta_bid
+    df['ask_delta'] = v_delta_ask
+
     df['mid_delta'] = (df['bid_delta'] + df['ask_delta']) / 2
 
     df['moneyness'] = df.index.get_level_values('strike').astype(float) / df['spot']

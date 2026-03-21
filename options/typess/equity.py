@@ -58,3 +58,16 @@ class Equity(Security):
 
     def __str__(self):
         return self.__repr__()
+
+    def __getstate__(self):
+        return {'symbol': self.__repr__(), 'multiplier': self.multiplier}
+
+    def __setstate__(self, state):
+        self.__dict__ = state
+
+
+# if __name__ == '__main__':
+#     import pickle
+#     equity = Equity('AAPL')
+#     a = pickle.dumps(equity)
+#     eq = pickle.loads(a)

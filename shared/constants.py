@@ -28,7 +28,7 @@ def EarningsPreSessionDates(sym: str):
     return sorted([datetime.date.fromisoformat(x['Date']) for x in earnings_announcements if x['Symbol'].upper() == sym.upper()])
 
 
-model_nm_earnings_iv_drop_regressor = os.environ.get('model_nm_earnings_iv_drop_regressor', 'earnings_iv_drop_regressor_v3_2024-07-08.joblib')
+model_nm_earnings_iv_drop_regressor = os.environ.get('model_nm_earnings_iv_drop_regressor', 'f_20240918-215505')
 TZ_USEASTERN = 'US/Eastern'
 TZ_UTC = 'UTC'
 TZ_HK = 'Asia/Hong_Kong'
