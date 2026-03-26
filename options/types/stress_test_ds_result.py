@@ -3,9 +3,9 @@ import pandas as pd
 
 from dataclasses import dataclass, field
 from typing import Dict
-from options.typess.portfolio import Portfolio
-from options.typess.scenario import Scenario
-from options.typess.security import Security
+from options.types.portfolio import Portfolio
+from options.types.scenario import Scenario
+from options.types.security import Security
 from shared.modules.logger import info
 
 

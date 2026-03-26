@@ -4,9 +4,9 @@ import pandas as pd
 from itertools import chain
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Iterable, List, Dict
+from typing import List, Dict
 from options.helper import get_tenor
-from options.typess.dividend import Dividend
+from options.types.dividend import Dividend
 
 
 @dataclass

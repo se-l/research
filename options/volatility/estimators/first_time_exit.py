@@ -7,8 +7,8 @@ import pandas as pd
 import datetime
 
 import options.client as mClient
-from options.typess.enums import Resolution, TickType, SecurityType
-from options.typess.equity import Equity
+from options.types.enums import Resolution, TickType, SecurityType
+from options.types.equity import Equity
 
 
 def volatility_close_to_close(prices):

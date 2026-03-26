@@ -3,9 +3,9 @@ import datetime
 from dataclasses import dataclass
 from typing import Dict
 
-from options.typess.enums import TickType, Resolution
-from options.typess.security import Security, SecurityDataSnap
-from options.typess.scenario import Scenario
+from options.types.enums import TickType, Resolution
+from options.types.security import Security, SecurityDataSnap
+from options.types.scenario import Scenario
 
 
 @dataclass

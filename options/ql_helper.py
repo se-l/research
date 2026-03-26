@@ -2,7 +2,7 @@ from typing import Type
 
 import QuantLib as ql
 
-from options.typess.enums import OptionPricingModel
+from options.types.enums import OptionPricingModel
 
 
 def get_bsm(calculation_date, spot_quote, hv_quote, rf_quote, dividend_rate_quote, calendar, day_count):

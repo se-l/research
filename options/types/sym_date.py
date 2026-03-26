@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 @dataclass
 class SymDate:
+    """For grouping by earnings release dates"""
     symbol: str
     date: date
 
@@ -15,3 +16,6 @@ class SymDate:
 
     def __hash__(self):
         return hash((self.symbol, self.date))
+
+    def __repr__(self):
+        return f"{self.symbol} - {self.date.isoformat()}"

@@ -4,7 +4,7 @@ import plotly.graph_objs as go
 from datetime import date
 from dataclasses import dataclass
 from typing import Dict, Tuple
-from options.typess.enums import OptionRight
+from options.types.enums import OptionRight
 
 
 @dataclass

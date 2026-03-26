@@ -4,10 +4,10 @@ from decimal import Decimal
 from dataclasses import dataclass
 from typing import Dict
 
-from options.typess.enums import OptionRight, OptionStyle, TickType, Resolution
-from options.typess.equity import Equity
-from options.typess.security import Security, SecurityDataSnap
-from options.typess.scenario import Scenario
+from options.types.enums import OptionRight, OptionStyle, TickType, Resolution
+from options.types.equity import Equity
+from options.types.security import Security, SecurityDataSnap
+from options.types.scenario import Scenario
 from shared.constants import dt_fmt_ymd
 
 

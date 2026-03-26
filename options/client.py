@@ -12,11 +12,11 @@ from functools import reduce
 from typing import List, Dict, Union, Set, Iterable
 from zipfile import ZipFile
 
-from options.typess.security import Security
+from options.types.security import Security
 from shared.constants import file_root
-from options.typess.enums import TickType, CsvHeader, Resolution, SecurityType
-from options.typess.equity import Equity
-from options.typess.option_contract import OptionContract
+from options.types.enums import TickType, CsvHeader, Resolution, SecurityType
+from options.types.equity import Equity
+from options.types.option_contract import OptionContract
 from shared.modules.logger import logger, warning, info
 
 bp = 10_000
@@ -148,7 +148,6 @@ class Client:
         """
         This is fairly slow when reading quotes, sec resolution. Can mp over files ideally an open each zip file only once.
         """
-        from options.helper import is_holiday  # local to avoid circular import
 
         if resolution in (Resolution.hour, Resolution.daily):
             return self.history_hour_day(symbols, start, end, resolution, tick_type, security_type)
@@ -298,6 +297,14 @@ class Client:
                     out_contracts[c.expiry].add(c)
 
         return out_contracts
+
+    def get_all_contracts(self, symbol: Equity, start: datetime.date, end: datetime.date) -> Set[OptionContract]:
+        """
+        Return all contracts found in the zip files for the given symbol from start to end date.
+        Requires daily zips to have been populated. In future, rather store snaps from massive, eg, openinterest.
+        """
+        contracts = self.option_contracts(str(symbol), end, include_expired=True, start=start)
+        return set(contracts)
 
     def get_contracts(self, symbol: Equity, start: datetime.date = None, end: datetime.date = None, strike_range=(0, 999999)) -> Dict[datetime.date, List[OptionContract]]:
         as_of = end or datetime.date.today()

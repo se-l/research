@@ -25,6 +25,8 @@ DiscountRateMarket = (DividendYield or {}).get('DiscountRateMarket', 0.0435)  # 
 
 
 def EarningsPreSessionDates(sym: str):
+    """Returned dates are the last open market trading days before an earnings announcement.
+    So if the release is in the morning before market open, then this return T-1 business date"""
     return sorted([datetime.date.fromisoformat(x['Date']) for x in earnings_announcements if x['Symbol'].upper() == sym.upper()])
 
 

@@ -9,9 +9,9 @@ import matplotlib.pyplot as plt
 
 from options.client import read_option_csvs_from_zip, Client, CsvNmSymDt
 from options.helper import get_tenor
-from options.typess.enums import Resolution, SecurityType, TickType, OptionRight
-from options.typess.equity import Equity
-from options.typess.option_contract import OptionContract
+from options.types.enums import Resolution, SecurityType, TickType, OptionRight
+from options.types.equity import Equity
+from options.types.option_contract import OptionContract
 
 @dataclass
 class Stats:

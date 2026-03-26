@@ -9,15 +9,14 @@ import psutil
 import pyomo.environ as pyo
 import signal
 
-from scipy.stats import t
 from multiprocessing import Process, Queue
-from typing import Tuple, List, Any, Dict
+from typing import Tuple, List
 from pprint import pprint
 from pyomo.environ import ConcreteModel, SolverFactory, Constraint
 from options.helper import apply_ds_ret_weights, cache_to_disk, get_density_for_bimodal_t_dist
-from options.typess.earnings_config import EarningsConfig
-from options.typess.option import Option
-from options.typess.portfolio import Portfolio
+from options.types.earnings_config import EarningsConfig
+from options.types.option import Option
+from options.types.portfolio import Portfolio
 from shared.modules.logger import warning, info, error
 from shared.paths import Paths
 

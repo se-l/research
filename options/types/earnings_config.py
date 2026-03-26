@@ -4,11 +4,9 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Tuple
 
-from options.typess.enums import Resolution
-from options.typess.portfolio import Portfolio
+from options.types.enums import Resolution
+from options.types.portfolio import Portfolio
 from options.volatility.estimators.earnings_iv_drop_poly_regressor import EarningsIVDropPolyRegressorV3
-from shared.constants import model_nm_earnings_iv_drop_regressor, EarningsPreSessionDates
-from shared.paths import Paths
 
 
 @dataclass

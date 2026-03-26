@@ -16,14 +16,14 @@ from numba import njit
 from numpy import ndarray, dtype
 from numpy._typing import NDArray
 
-from options.typess.dividend import get_dividends, Dividend
-from options.typess.equity import Equity
-from options.typess.security import Security, SecurityDataSnap
-from options.typess.scenario import Scenario
+from options.types.dividend import get_dividends, Dividend
+from options.types.equity import Equity
+from options.types.security import Security, SecurityDataSnap
+from options.types.scenario import Scenario
 from shared.constants import DiscountRateMarket
 from options.ql_helper import engined_option
-from options.typess.enums import OptionPricingModel, OptionRight, TickType, Resolution
-from options.typess.option_contract import OptionContract
+from options.types.enums import OptionPricingModel, OptionRight, TickType, Resolution
+from options.types.option_contract import OptionContract
 import numba as nb
 import merlin
 
@@ -544,7 +544,6 @@ def price_calcs():
 
 
 def test_price_iv_price_loop():
-    from options.helper import df2iv
     calculation_date = date(2024, 6, 26)
     s = 296.5
     # sample = TestSample(calculation_date, date(2026, 1, 16), Decimal('400.0'), OptionRight.call, price=11.50)

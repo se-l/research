@@ -5,8 +5,8 @@ import pandas as pd
 
 from dataclasses import dataclass
 from shared.paths import Paths
-from options.typess.enums import Resolution
-from options.typess.equity import Equity
+from options.types.enums import Resolution
+from options.types.equity import Equity
 
 
 @dataclass

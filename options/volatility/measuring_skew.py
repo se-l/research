@@ -8,10 +8,10 @@ from datetime import date, timedelta
 from plotly.subplots import make_subplots
 
 from options.helper import year_quarter, atm_iv
-from options.typess.equity import Equity
-from options.typess.enums import Resolution, OptionRight
-from options.typess.iv_surface import enrich_mean_regressed_skew_for_ds
-from options.typess.option_frame import OptionFrame
+from options.types.equity import Equity
+from options.types.enums import Resolution, OptionRight
+from options.types.iv_surface import enrich_mean_regressed_skew_for_ds
+from options.types.option_frame import OptionFrame
 from options.volatility.estimators.earnings_iv_drop_poly_regressor import EarningsIVDropPolyRegressorV3
 from shared.constants import EarningsPreSessionDates
 from shared.paths import Paths

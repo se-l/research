@@ -6,12 +6,12 @@ from collections.abc import Mapping
 from typing import Dict, Set, List
 
 from google.protobuf.internal.containers import MessageMap
-from options.typess.cash import Cash
-from options.typess.equity import Equity
-from options.typess.holding import Holding
-from options.typess.option import Option
-from options.typess.security import Security, SecurityDataSnap
-from options.typess.scenario import Scenario
+from options.types.cash import Cash
+from options.types.equity import Equity
+from options.types.holding import Holding
+from options.types.option import Option
+from options.types.security import Security, SecurityDataSnap
+from options.types.scenario import Scenario
 from shared.modules.logger import warning
 
 

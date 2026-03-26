@@ -1,7 +1,7 @@
 import numpy as np
 
 from datetime import date
-from options.typess.option import get_price_cuda
+from options.types.option import get_price_cuda
 from shared.yield_curve import ZeroCurveData
 
 

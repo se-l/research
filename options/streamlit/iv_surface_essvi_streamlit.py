@@ -10,7 +10,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 project_dir = os.path.abspath(os.path.join(current_dir, '..', '..'))
 sys.path.append(project_dir)
 
-from options.typess.iv_surface_essvi import f_essvi_iv
+from options.types.iv_surface_essvi import f_essvi_iv
 
 
 st.set_page_config(

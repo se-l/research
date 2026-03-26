@@ -1,5 +1,4 @@
 import time
-from copy import copy
 
 import pandas as pd
 import numpy as np
@@ -16,13 +15,13 @@ from typing import Dict, List, Tuple, Callable, Iterable, Literal
 from numpy._typing import NDArray
 from plotly.subplots import make_subplots
 from statsmodels.tools.eval_measures import rmse, meanabs
-from options.helper import get_tenor, get_v_iv, FV, timer, get_v_tenor, get_moneyness_fwd_ln, get_moneyness_fwd, date_to_sod
-from options.typess.calibration_item import CalibrationItem
-from options.typess.dividend import get_dividends
-from options.typess.iv_surface_model_evaluation import IVSurfaceModelEvaluation
-from options.typess.option import get_price_cuda
-from options.typess.enums import OptionRight
-from options.typess.equity import Equity
+from options.helper import get_tenor, get_v_iv, FV, timer, get_moneyness_fwd, date_to_sod
+from options.types.calibration_item import CalibrationItem
+from options.types.dividend import get_dividends
+from options.types.iv_surface_model_evaluation import IVSurfaceModelEvaluation
+from options.types.option import get_price_cuda
+from options.types.enums import OptionRight
+from options.types.equity import Equity
 from scipy.optimize import least_squares
 
 from shared.constants import EarningsPreSessionDates, DiscountRateMarket
@@ -449,7 +448,6 @@ class MetricSSVI:
 class DataPointSSVIOverTime:
     surface_id: UUID
     underlying: str
-    # right: OptionRight | str
     tenor_dt: date
     tenor: float
     model_param: MetricSSVI | str

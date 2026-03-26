@@ -1,9 +1,9 @@
 from dataclasses import dataclass
 from datetime import date
 
-from options.typess.enums import SecurityType
-from options.typess.option_contract import OptionContract
-from options.typess.security import Security
+from options.types.enums import SecurityType
+from options.types.option_contract import OptionContract
+from options.types.security import Security
 
 
 @dataclass
@@ -14,8 +14,8 @@ class Holding:
     @classmethod
     def from_holding_pb(cls, holding_pb: object,  calculation_date: date = None, security_type: SecurityType = None):  # protobuf holding_pb
         # recursive import
-        from options.typess.equity import Equity
-        from options.typess.option import Option
+        from options.types.equity import Equity
+        from options.types.option import Option
 
         security_type = security_type or SecurityType.infer_from_ib_symbol(holding_pb.symbol)
 

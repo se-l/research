@@ -4,17 +4,17 @@ import plotly.graph_objs as go
 
 from typing import Dict
 from itertools import chain
-from datetime import timedelta, datetime, time, date
+from datetime import timedelta, date
 
 from plotly.subplots import make_subplots
 from options.client import Client
 from options.helper import quotes2multi_index_df, aewma, df2iv, get_v_tenor_from_index, get_dividend_amount_times
-from options.typess.dividend import get_dividends
-from options.typess.enums import TickType, Resolution, SecurityType, OptionRight
-from options.typess.equity import Equity
-from options.typess.option import get_delta_cuda, get_vega_cuda
-from options.typess.option_contract import OptionContract
-from shared.constants import DiscountRateMarket, EarningsPreSessionDates
+from options.types.dividend import get_dividends
+from options.types.enums import TickType, Resolution, SecurityType, OptionRight
+from options.types.equity import Equity
+from options.types.option import get_delta_cuda, get_vega_cuda
+from options.types.option_contract import OptionContract
+from shared.constants import EarningsPreSessionDates
 from shared.modules.logger import logger
 from shared.plotting import plot_ps_trace, show
 from markdown import markdown as md

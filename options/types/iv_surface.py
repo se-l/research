@@ -7,16 +7,16 @@ from decimal import Decimal
 from typing import Dict
 from functools import partial
 
-from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator, CloughTocher2DInterpolator
-from scipy.interpolate.interpnd import NDInterpolatorBase
+from scipy.interpolate import LinearNDInterpolator
+# from scipy.interpolate.interpnd import NDInterpolatorBase
 
 from shared.modules.logger import logger
 from shared.utils.decorators import time_it
-from shared.constants import EarningsPreSessionDates, DiscountRateMarket
-from options.helper import year_quarter, interpolate_pt, get_tenor, get_dividend_yield
-from options.typess.enums import Resolution, OptionRight
-from options.typess.equity import Equity
-from options.typess.option_frame import OptionFrame
+from shared.constants import DiscountRateMarket
+from options.helper import interpolate_pt, get_tenor, get_dividend_yield
+from options.types.enums import OptionRight
+from options.types.equity import Equity
+from options.types.option_frame import OptionFrame
 from shared.plotting import show
 from plotly.subplots import make_subplots
 from scipy.optimize import curve_fit
@@ -44,7 +44,7 @@ class IVSurface:
         self.df = df
         self.calc_date = calc_date
         self.df_ah = pd.DataFrame()
-        self.interpolators: Dict[(Grid, InterpolationMethod, OptionRight), NDInterpolatorBase] = {}
+        self.interpolators: Dict[(Grid, InterpolationMethod, OptionRight), 'NDInterpolatorBase'] = {}
 
     def init_interpolator(self, grid: Grid = Grid.tenor_mny_fwd_ln, method: InterpolationMethod = InterpolationMethod.linearND, right: OptionRight = None, col='mid_iv'):
         """

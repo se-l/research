@@ -15,7 +15,7 @@ class Paths:
     src_path = src_path
     common = os.path.join(src_path, 'shared')
 
-    path_trade = Path(os.environ.get('PATH_TRADE', r'D:\trade'))
+    path_trade = Path(os.environ.get('PATH_TRADE'))
     analytics = path_trade.joinpath('Analytics')
     path_models = path_trade.joinpath('models')
     path_data = path_trade.joinpath('data')

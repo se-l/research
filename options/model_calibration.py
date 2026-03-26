@@ -21,10 +21,10 @@ from scipy.interpolate import LinearNDInterpolator
 from shared.paths import Paths
 from options.helper import plot_vol_surface, repair_prices, str2ql_option_right, make_eu_option, np1d_from_df, plot_surface, delta_bsm, \
     set_ql_calculation_date, find_loc_every_x_pc, to_ql_dt
-from options.typess.enums import TickType, SecurityType, Resolution
-from options.typess.equity import Equity
-from options.typess.option_contract import OptionContract
-from options.typess.option import Option
+from options.types.enums import TickType, SecurityType, Resolution
+from options.types.equity import Equity
+from options.types.option_contract import OptionContract
+from options.types.option import Option
 
 warnings.filterwarnings('ignore')
 

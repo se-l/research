@@ -9,7 +9,7 @@ from functools import lru_cache
 from typing import Dict, List, Tuple
 from dataclasses import dataclass
 
-from options.typess.equity import Equity
+from options.types.equity import Equity
 from shared.constants import dt_fmt_ymd
 from shared.paths import Paths
 
