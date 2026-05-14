@@ -144,7 +144,7 @@ class Client:
 
         return dct_path_csvs
 
-    def history(self, symbols: Iterable[Union[Equity, OptionContract]], start: datetime.date, end: datetime.date, resolution: Resolution.minute, tick_type: TickType.quote, security_type) -> Dict[str, pd.DataFrame]:
+    def history(self, symbols: Iterable[Union[Equity, OptionContract]], start: datetime.date, end: datetime.date, resolution: Resolution|str, tick_type: TickType|str, security_type) -> Dict[str, pd.DataFrame]:
         """
         This is fairly slow when reading quotes, sec resolution. Can mp over files ideally an open each zip file only once.
         """
@@ -176,7 +176,7 @@ class Client:
                         output[k] = v
         return output
 
-    def date_present(self, symbol: Equity, date: datetime.date, security_type: SecurityType) -> bool:
+    def date_present(self, symbol: Equity, date: datetime.date, security_type: SecurityType|str) -> bool:
         resolution = Resolution.second
         underlying_folder = symbol.underlying_symbol.lower() if isinstance(symbol, OptionContract) else str(symbol).lower()
 
@@ -195,7 +195,7 @@ class Client:
 
         return True
 
-    def history_hour_day(self, symbols: Iterable[Union[Equity, OptionContract]], start: datetime.date, end: datetime.date, resolution: Resolution.minute, tick_type: TickType.quote, security_type) -> Dict[str, pd.DataFrame]:
+    def history_hour_day(self, symbols: Iterable[Union[Equity, OptionContract]], start: datetime.date, end: datetime.date, resolution: Resolution|str, tick_type: TickType|str, security_type) -> Dict[str, pd.DataFrame]:
         output = {}
         for symbol in symbols:
             if isinstance(symbol, Equity) and tick_type == TickType.quote and resolution in (Resolution.daily, Resolution.hour):
@@ -218,7 +218,7 @@ class Client:
                 # print('Opening', os.path.join(directory, file), csv_name)
                 with ZipFile(file_full_path, 'r') as zipObj:
                     if csv_name not in zipObj.namelist():
-                        logger.warning(f'Missing {csv_name} in {file_full_path}')
+                        logger.warning(f'Missing {csv_name} in {file_full_path}. Case-sensitive.')
                         continue
                     df: pd.DataFrame = pd.read_csv(zipObj.open(csv_name), names=getattr(CsvHeader, tick_type), index_col=False)
                     if df.empty:

@@ -9,7 +9,6 @@ from google.protobuf.internal.containers import MessageMap
 from options.types.cash import Cash
 from options.types.equity import Equity
 from options.types.holding import Holding
-from options.types.option import Option
 from options.types.security import Security, SecurityDataSnap
 from options.types.scenario import Scenario
 from shared.modules.logger import warning
@@ -43,6 +42,7 @@ class Portfolio(Mapping):
         self.holdings.pop(security) if security in self.holdings else None
 
     def delta_total(self, calc_date: date, s: float, df: pd.DataFrame, iv_col: str = 'mid_iv') -> float:
+        from options.types.option import Option
         from options.helper import val_from_df
         _delta_total = 0
         for sec, q in self.holdings.items():

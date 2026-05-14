@@ -12,7 +12,7 @@ import signal
 from multiprocessing import Process, Queue
 from typing import Tuple, List
 from pprint import pprint
-from pyomo.environ import ConcreteModel, SolverFactory, Constraint
+from pyomo.environ import ConcreteModel, SolverFactory, Constraint, value
 from options.helper import apply_ds_ret_weights, cache_to_disk, get_density_for_bimodal_t_dist
 from options.types.earnings_config import EarningsConfig
 from options.types.option import Option
@@ -325,6 +325,9 @@ def get_sub_problems(m: ConcreteModel, pf: Portfolio, scoped_options: List[Optio
         inst = m.create_instance()
         inst.c4 = Constraint(expr=inst.v_var_abs[scoped_options.index(sec)] == 0)
         yield cloudpickle.dumps(inst)
+
+def get_sub_problems_lst(m: ConcreteModel, pf: Portfolio, scoped_options: List[Option]) -> List[bytes]:
+    return list(get_sub_problems(m, pf, scoped_options))
 
 
 def serialize_instance(inst):

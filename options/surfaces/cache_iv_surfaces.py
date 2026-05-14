@@ -10,7 +10,7 @@ from options.types.scope_pre_post import ScopePrePost, scoped_dates
 from options.types.quote_side import QuoteSide
 from options.types.sym_date import SymDate
 from shared.constants import EarningsPreSessionDates
-from shared.modules.logger import info
+from shared.modules.logger import info, error
 from options.frame_builder import available_sym_dates, check_data_presence
 from options.types.enums import Resolution
 from options.types.equity import Equity
@@ -18,6 +18,11 @@ from shared.paths import Paths
 
 
 def list_valid_training_sym_dates(tickers=None):
+    """
+    Prints how many valid earnings release option data sets I have and where data is incomplete.
+    :param tickers:
+    :return:
+    """
     tickers_in = ','.join(tickers or os.listdir(Paths.path_data.joinpath('option', 'usa', 'second'))).upper()
 
     root = Paths.path_analysis_frames
@@ -95,15 +100,18 @@ def execute(payloads, already_exist):
 def exec_payload(payload):
     equity = payload[0]
     seq_ret_threshold = payload[3]
-    v_ivs = get_v_ivs(*payload)
-    calc_date = payload[1][0]
-    calibrate_yield_curve_and_store(v_ivs, calc_date, equity, seq_ret_threshold=seq_ret_threshold)
-    # if not YieldCurve().has_calibrated_curve(calc_date, equity) and v_ivs:
-    #     try:
-    #         calibrate_yield_curve_and_store(v_ivs, calc_date, equity, seq_ret_threshold=seq_ret_threshold)
-    #     except Exception as e:
-    #         warning(e)
-    info(f'yield curve calibrated for {equity.symbol} - {calc_date}')
+    try:
+        v_ivs = get_v_ivs(*payload)
+        calc_date = payload[1][0]
+        calibrate_yield_curve_and_store(v_ivs, calc_date, equity, seq_ret_threshold=seq_ret_threshold)
+        # if not YieldCurve().has_calibrated_curve(calc_date, equity) and v_ivs:
+        #     try:
+        #         calibrate_yield_curve_and_store(v_ivs, calc_date, equity, seq_ret_threshold=seq_ret_threshold)
+        #     except Exception as e:
+        #         warning(e)
+        info(f'yield curve calibrated for {equity.symbol} - {calc_date}')
+    except Exception as e:
+        error(f'exec_payload(): {e}')
 
 
 if __name__ == "__main__":
@@ -117,18 +125,21 @@ if __name__ == "__main__":
     # Test calibration on the last tenor. Both IV and price are massively off mid price/iv
     # equity = Equity('DAL')
     equities = [
-        Equity('NKE').symbol.upper(),
+        # Equity('NKE').symbol.upper(),
         # Equity('DAL').symbol.upper(),
         # Equity('FDX').symbol.upper(),
-        # Equity('TGT').symbol.upper(),
+        # Equity('TGT').symbol.upper(),  # data missing
         # Equity('DELL').symbol.upper(),
         # Equity('PEP').symbol.upper(),
         # Equity('PATH').symbol.upper(),
         # Equity('ORCL').symbol.upper(),
+        Equity('CSCO').symbol.upper(),
     ]
     # equities = [Equity('FDX').symbol.upper(), Equity('DAL').symbol.upper()]
 
-    cache_all_surfaces(equities)
+    # # list_valid_training_sym_dates(['NKE'])
+    for eq in equities:
+        cache_all_surfaces([eq])
     # cache_all_surfaces([])
     # list_valid_training_sym_dates(['NKE'])
     print('Done.')

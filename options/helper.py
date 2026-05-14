@@ -10,7 +10,6 @@ import multiprocessing
 import matplotlib.pyplot as plt
 import os
 import numpy as np
-import merlin
 # import py_vollib_vectorized
 
 from hashlib import sha256
@@ -34,7 +33,6 @@ from scipy.stats import t
 import options.client as mClient
 from options.types.dividend import get_dividends, Dividend
 from options.types.enums import Resolution, TickType, SecurityType, GreeksEuOption, SkewMeasure, OptionRight, OptionPricingModel
-from options.types.option import Option, Style
 from options.types.option_contract import OptionContract
 from options.types.equity import Equity
 from options.types.option_frame import OptionFrame
@@ -45,6 +43,7 @@ from shared.modules.logger import logger, warning
 from functools import wraps
 from time import perf_counter
 from shared.paths import Paths
+from shared.utils.decorators import time_it
 from shared.yield_curve import YieldCurve, ZeroCurveData
 
 reload(mClient)
@@ -314,6 +313,7 @@ def repair_prices(df_q, calculation_date: date, n_repairs=1, plot=False, right='
 
     solver: 'glpk' or 'ipopt' or 'cbc'
     """
+    import merlin
     col_nm_map = col_nm_map or {}
     col_nm_map = {**{'mid_close': 'mid_close', 'bid_close': 'bid_close', 'ask_close': 'ask_close', 'mid_iv': 'mid_iv', 'strike': 'strike', 'tenor': 'tenor', 'expiry': 'expiry'},
                   **col_nm_map}
@@ -480,7 +480,7 @@ def enrich_atm_iv_by_right(df, col_nm='atm_iv_by_right'):
 
 
 @lru_cache(maxsize=2**10)
-def get_tenor(dt: date, calculation_dt: Union[date, ql.Date]) -> float:
+def get_tenor(dt: date, calculation_dt: Union[datetime, ql.Date]) -> float:
     """
     Presuming able to send exercise notice at about 17:30 on exercise day.
     If calculation_dt is a date only, presume it's 9:30 market open time.
@@ -561,13 +561,22 @@ def add_year_fraction(t0: datetime, tenor: float | Iterable[float]) -> datetime 
 
 def date_to_sod(dt: date) -> datetime:
     if isinstance(dt, datetime):
+        if dt.time() == time(0, 0, 0):
+            return date_to_datetime(dt.date(), timedelta(hours=9, minutes=30))
         return dt
-    return datetime(year=dt.year, month=dt.month, day=dt.day) + timedelta(hours=9, minutes=30)
+    return date_to_datetime(dt, timedelta(hours=9, minutes=30))
 
-def date_to_eod_expiry(dt: date, time=timedelta(hours=17, minutes=30)) -> datetime:
+def date_to_datetime(dt: date, timedelta_val: timedelta) -> datetime:
     if isinstance(dt, datetime):
         return dt
-    return datetime(year=dt.year, month=dt.month, day=dt.day) + time
+    return datetime(year=dt.year, month=dt.month, day=dt.day) + timedelta_val
+
+def date_to_eod_expiry(dt: date) -> datetime:
+    if isinstance(dt, datetime):
+        if dt.time() == time(0, 0, 0):
+            return date_to_datetime(dt.date(), timedelta(hours=17, minutes=30))
+        return dt
+    return date_to_datetime(dt, timedelta(hours=17, minutes=30))
 
 def _yearfrac_act365(t0: datetime, t1: date | datetime | NDArray[datetime]) -> float | NDArray[np.float64]:
     """
@@ -577,20 +586,6 @@ def _yearfrac_act365(t0: datetime, t1: date | datetime | NDArray[datetime]) -> f
     if isinstance(t1, (datetime, date)):
         return (date_to_sod(t1) - t0).days / 365.0
     return np.array([(date_to_sod(d) - t0).days / 365.0 for d in t1], dtype=float)
-
-
-# def _interp_zero_rate(curve, t: NDArray[np.float64]) -> NDArray[np.float64]:
-#     """
-#     Linear interpolation of zero rates on the provided curve times.
-#     Extrapolates flat beyond endpoints.
-#     """
-#     times = np.asarray(curve.times, dtype=float)
-#     rates = np.asarray(curve.rates, dtype=float)
-#     if times.size == 0:
-#         # Fallback (should be rare): flat single rate
-#         return np.full_like(t, float(DiscountRateMarket), dtype=float)
-#
-#     return np.interp(t, times, rates, left=rates[0], right=rates[-1])
 
 def _interp_zero_rate(curve, t: NDArray[np.float64]) -> NDArray[np.float64]:
     """
@@ -723,7 +718,6 @@ def forward_from_curve_and_divs(
         fwd = (spot * np.exp(-float(dividend_yield) * np.asarray(T, dtype=float))) / P0T
     return fwd
 
-
 def get_moneyness_fwd(
         equity: Equity,
         strike: NDArray[np.float64],
@@ -754,7 +748,7 @@ def get_moneyness_fwd(
             )
         return mny_fwd
     else:
-        yield_curve = yield_curve_in or YieldCurve().get_zero_curve(t0)
+        yield_curve = yield_curve_in or YieldCurve().get_last_zero_curve(t0, equity)
         t1 = add_year_fraction(t0, tenor)
         cash_dividends: List[Dividend] = get_dividends(equity.symbol.upper(), t0)
         div_yield = float(get_dividend_yield(equity)) if not cash_dividends else 0.0
@@ -762,7 +756,7 @@ def get_moneyness_fwd(
         spot_fwd = forward_from_curve_and_divs(
             spot=spot,
             t0=t0,
-            t1=np.asarray(t1, dtype=object),
+            t1=np.asarray([t1], dtype=object) if isinstance(t1, (date, datetime)) else np.asarray(t1),
             yield_curve=yield_curve,
             cash_dividends=cash_dividends,
             dividend_yield=div_yield,
@@ -774,7 +768,7 @@ def get_moneyness_fwd_ln(equity: Equity,
                          strike: float | np.ndarray,
                          spot: float | np.ndarray,
                          tenor: float | np.ndarray,
-                         t0: date,
+                         t0: datetime,
                          ) -> float | np.ndarray:
     """k = log(K/Se(r−δ)τ)"""
     return np.log(get_moneyness_fwd(equity, strike, spot, tenor, t0))
@@ -1453,6 +1447,7 @@ def ps_index2option_contract(ps: pd.Series, equity: Equity) -> OptionContract:
 
 
 def df2iv(df: pd.DataFrame, price_col_nm: str, spot_col_nm: str = 'spot', tenor_col_nm='tenor', dividends: List[Dividend]=None, calculation_date: date | NDArray[date] = None, na2zero=True, equity: Equity=None) -> np.ndarray:
+    from options.types.option import get_v_iv
     v: np.ndarray = get_v_iv(
         p=df[price_col_nm].values,
         s=df[spot_col_nm].values,
@@ -1467,48 +1462,6 @@ def df2iv(df: pd.DataFrame, price_col_nm: str, spot_col_nm: str = 'spot', tenor_
         # This should be handled better by first checking which prices are below intrinsic value and only send remaining values here.
         v[np.isnan(v)] = 0
     return v
-
-
-def get_v_iv(p: np.ndarray, s: np.ndarray, k: np.ndarray, t: np.ndarray, v_is_call: NDArray[int], dividends: List[Dividend] = None, calculation_date: date | NDArray[date]=None, yield_curve=None, equity: Equity=None) -> np.ndarray:
-    if not isinstance(calculation_date, date):
-        v = np.zeros_like(p)
-        unique_dt, inv = np.unique(calculation_date, return_inverse=True)
-        for i, dt in enumerate(unique_dt):
-            yield_curve = yield_curve or YieldCurve().get_zero_curve(dt)
-            div_amounts, div_times = dividends2amount_times(dividends=dividends, calculation_date=dt)
-
-            ix = inv == i
-            v[ix] = np.array(merlin.get_v_iv_fd_gpu(
-                prices=p[ix],
-                spots=s[ix],
-                strikes=k[ix],
-                tenors=t[ix],
-                v_is_call=v_is_call[ix],
-                rates_curve=yield_curve.rates,
-                rates_times=yield_curve.times,
-                div_amounts=div_amounts,
-                div_times=div_times,
-                max_iter=200
-            ))
-
-        return v
-    else:
-        yield_curve = yield_curve or YieldCurve().get_zero_curve(calculation_date, equity=equity)
-        div_amounts, div_times = dividends2amount_times(dividends=dividends, calculation_date=calculation_date)
-
-        return np.array(merlin.get_v_iv_fd_gpu(
-            prices=p,
-            spots=s,
-            strikes=k,
-            tenors=t,
-            v_is_call=v_is_call,
-            rates_curve=yield_curve.rates,
-            rates_times=yield_curve.times,
-            div_amounts=div_amounts,
-            div_times=div_times,
-            max_iter=200
-        ))
-
 
 def df2iv_european(df: pd.DataFrame, price_col_nm: str, rate: float, dividend_yield: float, spot_col_nm: str = 'spot', tenor_col_nm='tenor', na2zero=True) -> np.ndarray:
     v: np.ndarray = get_v_iv_european(
@@ -1578,7 +1531,7 @@ def is_holiday(dt: date):
     return dt.weekday() in (5, 6) or dt in get_market_hours_holidays()
 
 
-def earnings_download_dates_start_end(release_date: date, biz_days_prior=3, biz_days_after=2) -> Tuple[date, date]:
+def earnings_download_dates_start_end(release_date: date, biz_days_prior=2, biz_days_after=2) -> Tuple[date, date]:
     holidays = get_market_hours_holidays()
 
     start = None
@@ -1606,7 +1559,7 @@ def earnings_download_dates_start_end(release_date: date, biz_days_prior=3, biz_
     return start, end
 
 
-def earnings_download_dates(release_date: date, biz_days_prior=3, biz_days_after=2) -> List[date]:
+def earnings_download_dates(release_date: date, biz_days_prior=2, biz_days_after=2) -> List[date]:
     return [dt.date() for dt in pd.date_range(*earnings_download_dates_start_end(release_date, biz_days_prior, biz_days_after)) if not is_holiday(dt)]
 
 
@@ -1967,6 +1920,7 @@ def dividends2amount_times(dividends: List[Dividend], calculation_date: date) ->
 
 
 def perf_test_v_iv_fd_cuda(ticker='DAL'):
+    import merlin
     print("Loaded:", merlin)
     # ----------------- synthetic test data (1,000 options) -----------------
     n = 100_000
@@ -2133,6 +2087,7 @@ def samples_to_reconcile_ql_cuda_option_pricing():
     return samples
 
 def reconcile_ql_cuda_option_pricing(ticker='DAL'):
+    from options.types.option import Option, Style
     samples = samples_to_reconcile_ql_cuda_option_pricing()
     assert len({s['calc_date'] for s in samples}) == 1
     assert len({s['rate'] for s in samples}) == 1
@@ -2205,6 +2160,7 @@ def reconcile_ql_cuda_option_pricing(ticker='DAL'):
 
 
 def reconcile_ql_fd_cuda_option_pricing(ticker='DAL'):
+    from options.types.option import Option, Style
     samples = samples_to_reconcile_ql_cuda_option_pricing()
     assert len({s['calc_date'] for s in samples}) == 1
     assert len({s['rate'] for s in samples}) == 1
@@ -2233,7 +2189,7 @@ def reconcile_ql_fd_cuda_option_pricing(ticker='DAL'):
     # Define rate curve: rates at different time points
     r_curve = [r, r, r, r, r, r, r, r]  # Rates
     time_points = [0.0, 0.25, 0.5, 1.0, 2.0, 3, 4, 5]  # Time points (years)
-
+    import merlin
     cuda_ivs = merlin.get_v_iv_fd_cuda(
         prices=prices,
         spots=spots,

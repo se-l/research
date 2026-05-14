@@ -1,4 +1,5 @@
 import os
+from functools import lru_cache
 
 import pandas as pd
 import yfinance as yf
@@ -179,6 +180,7 @@ def _forecast_dividends(ticker: str, history: List[Dividend], until: date) -> Li
     return forecast
 
 
+@lru_cache(maxsize=None)
 def get_dividends(ticker: str, start: Union[str, date, datetime], end: Union[str, date, datetime]=None) -> List[Dividend]:
     if ticker.upper() in NO_DIVIDEDNS:  # might need to confirm once in a while...
         return []

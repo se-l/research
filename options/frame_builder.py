@@ -15,8 +15,7 @@ from options.types.option import get_vega_cuda, get_delta_cuda
 from options.types.sym_date import SymDate
 from shared.modules.logger import info, error
 from shared.paths import Paths
-from shared.constants import DiscountRateMarket, EarningsPreSessionDates
-from options.types.iv_surface import IVSurface, enrich_regressed_skew_rolling
+from shared.constants import DiscountRateMarket, EarningsPreSessionDates, USA, SECOND
 from options.helper import find_loc_every_x_pc, year_quarter, earnings_download_dates_start_end, spot_from_df_equity_into_options, df2atm_iv, \
     enrich_atm_iv_by_right, \
     ps2intrinsic_value, quotes2multi_index_df, load_option_trades, join_spot, join_quotes, ps2mid_iv_if_nonzero, get_dividend_yield, \
@@ -228,7 +227,6 @@ def enrich_trades(underlying: Equity, option_frame):
 
     df['intrinsic_value'] = df.apply(partial(ps2intrinsic_value, spot_column='spot'), axis=1)
     df['fill_iv'] = df2iv(df, price_col_nm='close', dividends=dividends, calculation_date=df['date'].values)
-    # df['fill_iv'] = df.apply(partial(ps2iv, price_col='close', calendar=calendar, day_count=day_count, dividend=dividend_yield), axis=1)
     df['extrinsic_value'] = df['close'] - df['intrinsic_value']
 
     # assert positive IV derived for positive extrinsic value. Probably need to adapt for very tiny extrinsic values
@@ -317,7 +315,7 @@ def fetch_option_frames_by_separate_dt_spans(dates: List[date], underlying: Equi
 
 
 def get_option_frame(underlying: Equity, dates: List[date], columns_quote: List[str] = (), columns_trade: List[str] = (), resolution: Resolution = Resolution.second,
-                     seq_ret_threshold: float = 0.01) -> OptionFrame:
+                     seq_ret_threshold: float = 0.002) -> OptionFrame:
     frames = []
     for dt in dates:
         frames.append(get_option_frame_by_date(underlying, [dt], columns_quote, columns_trade, resolution, seq_ret_threshold))
@@ -349,7 +347,7 @@ def get_option_frame_by_date(underlying: Equity, dates: List[date], columns_quot
     return option_frame
 
 
-def check_data_presence(sym_date: SymDate, scope: ScopePrePost) -> bool:
+def check_data_presence(sym_date: SymDate, scope: ScopePrePost|str) -> bool:
     client = Client()
     all_present = True
     ticker = sym_date.symbol
@@ -366,8 +364,8 @@ def check_data_presence(sym_date: SymDate, scope: ScopePrePost) -> bool:
     return all_present
 
 
-def available_sym_dates(tickers: str = None, scope: ScopePrePost = ScopePrePost.mini_train) -> List[SymDate]:
-    tickers_ = tickers or ','.join(os.listdir(r'D:\trade\data\option\usa\second')).upper()
+def available_sym_dates(tickers: str = None, scope: str|ScopePrePost = ScopePrePost.mini_train) -> List[SymDate]:
+    tickers_ = tickers or ','.join(os.listdir(Paths.path_data.joinpath(USA, SECOND))).upper()
     sym_dates = []
     for sym in tickers_.split(','):
         for release_date in EarningsPreSessionDates(sym):

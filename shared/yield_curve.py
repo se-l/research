@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from options.types.equity import Equity
 from shared.constants import dt_fmt_ymd
+from shared.modules.logger import info
 from shared.paths import Paths
 
 TENOR = 'Tenor'
@@ -132,9 +133,13 @@ class YieldCurve:
         df = pl.read_csv(path)
         return ZeroCurveData(times=list(df.get_column(TENOR)), rates=list(df.get_column(RATE)))
 
+    @lru_cache()
     def get_last_zero_curve(self, calculation_date: date, equity: Equity = None, delta_days=-14, market="usa") -> ZeroCurveData:
+        if isinstance(calculation_date, datetime):
+            return self.get_last_zero_curve(calculation_date.date(), equity, delta_days, market)
         for pd_dt in pd.date_range(calculation_date + timedelta(days=delta_days), calculation_date)[::-1]:
             if self.has_calibrated_curve(pd_dt, equity, market):
+                info(f'get_last_zero_curve(): calculation_date={calculation_date}, pd_dt={pd_dt}')
                 return self.get_zero_curve(pd_dt, equity, market=market)
         return self.get_zero_curve(calculation_date, market=market)
 

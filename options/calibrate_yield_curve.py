@@ -10,6 +10,7 @@ from scipy.optimize import least_squares
 from options.frame_builder import get_option_frame, available_sym_dates
 from options.surfaces.processors import get_df_qt, get_calibration_items, scoped_dates
 from options.helper import get_moneyness_fwd, date_to_sod
+from options.types.SSVIParams import SSVITenorParams, SSVISurfParams
 from options.types.calibration_item import CalibrationItem
 from options.types.dividend import get_dividends
 from options.types.enums import Resolution, OptionRight
@@ -22,9 +23,9 @@ from shared.modules.logger import info
 from shared.yield_curve import YieldCurve, ZeroCurveData
 
 
-def get_weighted_params(v_ivs: List[IVSurface]) -> Dict[date, List[float]]:
+def get_weighted_params(v_ivs: List[IVSurface]) -> SSVISurfParams:
     total = defaultdict(int)
-    weighted_params: Dict[date, List[float]] = {}
+    weighted_params: SSVISurfParams = SSVISurfParams()
 
     for ivs in v_ivs:
         for tenor, params in ivs.params.items():
@@ -32,15 +33,15 @@ def get_weighted_params(v_ivs: List[IVSurface]) -> Dict[date, List[float]]:
             n = len(ivs.calibration_items[tenor].bid_price)
             total[tenor] += n
             if not weighted_params.get(tenor):
-                weighted_params[tenor] = [0, 0, 0]
-            weighted_params[tenor][0] += theta * n
-            weighted_params[tenor][1] += rho * n
-            weighted_params[tenor][2] += psi * n
+                weighted_params[tenor] = SSVITenorParams(0, 0, 0)
+            weighted_params[tenor].theta += theta * n
+            weighted_params[tenor].rho += rho * n
+            weighted_params[tenor].psi += psi * n
 
     for tenor in weighted_params.keys():
-        weighted_params[tenor][0] /= total[tenor]
-        weighted_params[tenor][1] /= total[tenor]
-        weighted_params[tenor][2] /= total[tenor]
+        weighted_params[tenor].theta /= total[tenor]
+        weighted_params[tenor].rho /= total[tenor]
+        weighted_params[tenor].psi /= total[tenor]
 
     return weighted_params
 
@@ -50,7 +51,7 @@ def f_minimize_put_call_surface_difference(
         time_step: int,
         zero_rates: ZeroCurveData,
         equity: Equity,
-        params: Dict[date, Tuple[float, ...]],
+        params: SSVISurfParams,
         s,
         k,
         t,
@@ -97,13 +98,13 @@ def calibrate_yield_curve(
         equity: Equity,
         samples: Dict[date, CalibrationItem],
         calculation_date: date,
-        weighted_params,
+        weighted_params: SSVISurfParams,
         dividends,
         min_max_mny_fwd_ln = (-0.2, 0.2),
         delta_rates_bound=0.1,
         verbose=1
 ) -> ZeroCurveData:
-    zero_rates = YieldCurve().get_zero_curve(calculation_date)  # Not passing equity, get the uncalibrated curve...
+    zero_rates = YieldCurve().get_last_zero_curve(calculation_date, equity)
 
     vals = samples.values()
     bids = np.array(list(chain(*[i.bid_price for i in vals])))
@@ -124,14 +125,22 @@ def calibrate_yield_curve(
     ))
     ix_scoped = (min_max_mny_fwd_ln[0] < v_mny_fwd_ln) & (v_mny_fwd_ln < min_max_mny_fwd_ln[1])
 
-    for i, (tenor, rate) in enumerate(zip(zero_rates.times, zero_rates.rates)):
-        info(f'calibrate_yield_curve(): Fitting {calculation_date} {tenor}')
+    v_tenor_dt = sorted(set(v_expiry))
+    rates_0 = dict(zip(zero_rates.times, zero_rates.rates))
+
+    v_tenor = [(dt - calculation_date).days / 365 for dt in v_tenor_dt]
+    yc = YieldCurve()
+    rates_interpolated = [yc.interpolate_zero_rate(rates_0, tenor) for tenor in v_tenor]
+    zero_rates_interpolated = ZeroCurveData(v_tenor, rates_interpolated)
+
+    # refactor to calibrating for each tenor in the
+    for i, (tenor, rate) in enumerate(zip(zero_rates_interpolated.times, zero_rates_interpolated.rates)):
         fit_res = least_squares(
             fun=f_minimize_put_call_surface_difference,
             x0=rate,
             args=(
                 i,
-                zero_rates,
+                zero_rates_interpolated,
                 equity,
                 weighted_params,
                 s[ix_scoped],
@@ -148,10 +157,11 @@ def calibrate_yield_curve(
             max_nfev=5_000,
             bounds=([rate - delta_rates_bound], [rate + delta_rates_bound])
         )
+        to_rate = float(fit_res.x[0])
+        info(f'calibrate_yield_curve(): {equity} Calibrated {calculation_date} tenor={tenor:.5f}, from_rate={rate}, to_rate={to_rate}')
+        zero_rates_interpolated.rates[i] = to_rate
 
-        zero_rates.rates[i] = float(fit_res.x[0])
-
-    return zero_rates
+    return zero_rates_interpolated
 
 def calibrate_yield_curve_and_store(
         v_ivs: List[IVSurface],
@@ -162,10 +172,11 @@ def calibrate_yield_curve_and_store(
         seq_ret_threshold=0.002,
         plot=False,
         verbose=1,
+        n_samples_per_tenor=1000,
 ) -> ZeroCurveData:
     dividends = get_dividends(equity.symbol, calc_date)
     if plot:
-        YieldCurve.plot(YieldCurve().get_zero_curve(calc_date))
+        YieldCurve.plot(YieldCurve().get_last_zero_curve(calc_date, equity, -14))
     params = get_weighted_params(v_ivs)
     option_frame = get_option_frame(equity, [calc_date], resolution=resolution, seq_ret_threshold=seq_ret_threshold)
     df_q, df_t = get_df_qt(option_frame, equity, [calc_date])
@@ -173,7 +184,8 @@ def calibrate_yield_curve_and_store(
     if calibration_items is None:
         info(f'calibrate_yield_curve(): No calibration items found')
         return
-    samples = {item.tenor_dt: item for item in calibration_items if item.tenor_dt in params}
+    # samples = {item.tenor_dt: item for item in calibration_items if item.tenor_dt in params}
+    samples = {item.tenor_dt: item.downsample(min(n_samples_per_tenor, len(item.price))) for item in calibration_items}
     recalibrated_curve = calibrate_yield_curve(equity, samples, calculation_date=calc_date, weighted_params=params, dividends=dividends, verbose=verbose)
     if plot:
         YieldCurve.plot(recalibrated_curve)
@@ -192,8 +204,10 @@ def run(tickers: List[str]):
         sym = sym_date.symbol.lower()
         equity = Equity(sym)
         release_date = sym_date.date
+        if release_date != date(2024, 8, 29):
+            continue
 
-        for dt in scoped_dates(release_date, ScopePrePost.all):
+        for dt in scoped_dates(release_date, ScopePrePost.mini_train):
             calc_date = dt
             calibrate_yield_curve_and_store(calc_date, equity, resolution, side, seq_ret_threshold=seq_ret_threshold)
 
@@ -216,5 +230,5 @@ if __name__ == '__main__':
 
      Re-evaluate, same IV, but pricer will pick up different rates curve and arrive at better put-call parity.
     """
-    run(['FDX'])
+    run(['DELL'])
 

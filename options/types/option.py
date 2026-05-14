@@ -1,5 +1,3 @@
-import math
-
 import QuantLib as ql
 import numpy as np
 import pandas as pd
@@ -9,13 +7,11 @@ from typing import Iterable, Callable, Dict, List, Tuple, Any, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from functools import lru_cache
-from math import fabs, erf, erfc
 
 from QuantLib import DateVector, DoubleVector
-from numba import njit
 from numpy import ndarray, dtype
 from numpy._typing import NDArray
-
+from fino.fino_load import jl
 from options.types.dividend import get_dividends, Dividend
 from options.types.equity import Equity
 from options.types.security import Security, SecurityDataSnap
@@ -24,12 +20,12 @@ from shared.constants import DiscountRateMarket
 from options.ql_helper import engined_option
 from options.types.enums import OptionPricingModel, OptionRight, TickType, Resolution
 from options.types.option_contract import OptionContract
-import numba as nb
-import merlin
+# import merlin
 
+from shared.modules.logger import info
 from shared.yield_curve import YieldCurve, ZeroCurveData
 
-
+# --JL Converted-----------------------------------------
 @dataclass
 class GreekParameters:
     price_underlying: float
@@ -57,7 +53,7 @@ class Style:
     European = 'European'
     American = 'American'
     AmericanDiv = 'AmericanDiv'
-
+# --JL Converted-----------------------------------------
 
 class Option(Security):
     # Ideally refactored to combine with OptionContract
@@ -212,10 +208,10 @@ class Option(Security):
         self.volQuote.setValue(params.volatility)
 
         try:
-            delta = self.am_option.delta()
-            gamma = self.am_option.gamma()
-            vega = self.eu_option.vega()
-            theta = self.eu_option.theta()
+            delta = self.delta(params.volatility, params.price_underlying, self.calculationDate)
+            gamma = 0#self.am_option.gamma()
+            vega = self.vega(params.volatility, params.price_underlying, self.calculationDate)
+            theta = 0#self.eu_option.theta()
         except Exception as e:
             print(e)
             delta = gamma = vega = theta = 0
@@ -237,7 +233,7 @@ class Option(Security):
 
 
     @lru_cache(maxsize=2**12)
-    def npv(self, vol: float, price_underlying: float, calculation_date: date):
+    def npv(self, vol: float, price_underlying: float, calculation_date: date) -> float:
         """
         # For very large IV values, npv() starts failing... for far OTM/ITM, assume value to be intrinsic only...
         """
@@ -255,7 +251,17 @@ class Option(Security):
         # else:
         if calculation_date == self.expiry:
             return self.intrinsic_value()
-        return self.eu_option.NPV()
+        from options.helper import get_v_tenor, date_to_sod, date_to_eod_expiry
+        return get_price_cuda(
+            s=np.array([price_underlying]),
+            k=np.array([self.strike]),
+            t=get_v_tenor(np.array([date_to_eod_expiry(self.expiry)]), date_to_sod(calculation_date)),
+            v_is_call=np.array([1 if self.right == OptionRight.call else 0]),
+            iv=np.array([vol]),
+            dividends=get_dividends(self.underlying_symbol, calculation_date),
+            calculation_date=calculation_date,
+            yield_curve=YieldCurve().get_last_zero_curve(calculation_date, Equity(self.underlying_symbol)),
+        )[0]
 
     def nlv(self, market_data: Dict[Security, SecurityDataSnap], q=1, scenario=Scenario.mid):
         if scenario == Scenario.mid:
@@ -269,30 +275,53 @@ class Option(Security):
         return price * self.multiplier * q
 
     @lru_cache(maxsize=2**12)
-    def delta(self, vol, priceUnderlying, calculationDate):
+    def delta(self, vol, priceUnderlying, calculationDate) -> float:
+        from options.helper import get_v_tenor
+        from options.helper import date_to_eod_expiry, date_to_sod
         self.SetEvaluationDateToCalcDate(calculationDate)
         if priceUnderlying != self.underlyingQuote.value():
             self.underlyingQuote.setValue(priceUnderlying)
         if vol != self.volQuote.value():
             self.volQuote.setValue(vol)
+        return get_delta_cuda(
+            s=np.array([priceUnderlying]),
+            k=np.array([self.strike]),
+            t=get_v_tenor(np.array([date_to_eod_expiry(self.expiry)]), date_to_sod(calculationDate)),
+            v_is_call=np.array([1 if self.right == OptionRight.call else 0]),
+            iv=np.array([vol]),
+            dividends=get_dividends(self.underlying_symbol, calculationDate),
+            calculation_date=calculationDate,
+            yield_curve=YieldCurve().get_last_zero_curve(calculationDate, Equity(self.underlying_symbol)),
+        )[0]
         return self.eu_option.delta()
 
     @lru_cache(maxsize=2 ** 12)
-    def vega(self, vol, priceUnderlying, calculationDate):
+    def vega(self, vol, priceUnderlying, calculationDate) -> float:
+        from options.helper import get_v_tenor
+        from options.helper import date_to_eod_expiry, date_to_sod
         # code duplication... fix later
         self.SetEvaluationDateToCalcDate(calculationDate)
         if priceUnderlying != self.underlyingQuote.value():
             self.underlyingQuote.setValue(priceUnderlying)
         if vol != self.volQuote.value():
             self.volQuote.setValue(vol)
-        return self.eu_option.vega()
+        return get_vega_cuda(
+            s=np.array([priceUnderlying]),
+            k=np.array([self.strike]),
+            t=get_v_tenor(np.array([date_to_eod_expiry(self.expiry)]), date_to_sod(calculationDate)),
+            v_is_call=np.array([1 if self.right == OptionRight.call else 0]),
+            iv=np.array([vol]),
+            dividends=get_dividends(self.underlying_symbol, calculationDate),
+            calculation_date=calculationDate,
+            yield_curve=YieldCurve().get_last_zero_curve(calculationDate, Equity(self.underlying_symbol)),
+        )[0]
 
     def intrinsic_value(self, price_underlying: float = None):
         if price_underlying:
             self.underlyingQuote.setValue(price_underlying)
-        if self.right == 'call':
+        if self.right == OptionRight.call:
             return max(self.underlyingQuote.value() - self.strike, 0)
-        elif self.right == 'put':
+        elif self.right == OptionRight.put:
             return max(self.strike - self.underlyingQuote.value(), 0)
 
     def is_otm(self, priceUnderlying: float):
@@ -311,13 +340,6 @@ class Option(Security):
     #         'Delta': self.delta(),
     #         'SpotUnderlying': self.underlyingQuote.value(),
     #     }
-
-    @staticmethod
-    def price(s: float | np.ndarray, k: float | np.ndarray, t: float | np.ndarray, iv: float | np.ndarray, r: float | np.ndarray, q: float | np.ndarray, right: str | OptionRight):
-        if right == OptionRight.call:
-            return price_call(s, k, t, iv, r, q)
-        elif right == OptionRight.put:
-            return price_put(s, k, t, iv, r, q)
 
     @classmethod
     def pv(cls, k, t, r):
@@ -344,61 +366,29 @@ def dividends2amount_times(dividends: List[Dividend], calculation_date: date) ->
     )
 
 
-@nb.njit(fastmath=True)
-def get_d1(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], iv: float | NDArray[np.float64], r: float | NDArray[np.float64], q: float | NDArray[np.float64]):
-    return (np.log(s / k) + (r - q + iv ** 2 / 2) * t) / (iv * np.sqrt(t))
+# def get_price_cuda_cpp(s: float | NDArray[np.float64], k: float | NDArray[float], t: float | NDArray[np.float64], v_is_call: NDArray[int], iv: float | NDArray[np.float64], dividends: List[Dividend], calculation_date: date | NDArray[date], yield_curve:ZeroCurveData = None, equity: Equity=None, cpu=False) -> ndarray[Any, dtype[Any]]:
+#     if not isinstance(calculation_date, (date, datetime)):
+#         v = np.zeros_like(s)
+#         unique_dt, inverse = np.unique(calculation_date, return_inverse=True)
+#         for i, dt in enumerate(unique_dt):
+#             ix = inverse == i
+#             v[ix] = get_price_cuda_cpp(s[ix], k[ix], t[ix], v_is_call[ix], iv[ix], dividends=dividends, calculation_date=dt, yield_curve=yield_curve, equity=equity, cpu=cpu)
+#         return v
+#     else:
+#         yield_curve = yield_curve or YieldCurve().get_last_zero_curve(calculation_date, equity)
+#         div_amounts, div_times = dividends2amount_times(dividends, calculation_date)
+#         if not cpu:
+#             return np.array(merlin.get_v_fd_price(
+#                 spots=s, strikes=k, tenors=t, sigmas=iv, v_is_call=v_is_call, rates_curve=yield_curve.rates, rates_times=yield_curve.times, div_amounts=div_amounts, div_times=div_times,
+#                 time_steps=200, space_steps=200
+#             ))
+#         else:
+#             return np.asarray(merlin.get_v_fd_price_cpu(
+#                 spots=s, strikes=k, tenors=t, sigmas=iv, v_is_call=v_is_call, rates_curve=yield_curve.rates, rates_times=yield_curve.times, div_amounts=div_amounts, div_times=div_times,
+#                 time_steps=200, space_steps=200
+#             ))
 
-
-@nb.njit(fastmath=True)
-def get_d2(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], iv: float | NDArray[np.float64], r: float | NDArray[np.float64], q: float | NDArray[np.float64]):
-    return (np.log(s / k) + (r - q - iv ** 2 / 2) * t) / (iv * np.sqrt(t))
-    # return get_d1(s, k, t, iv, r, q) - iv * np.sqrt(t)
-
-
-@nb.njit(fastmath=True)
-def get_d1_derivative(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], iv: float | NDArray[np.float64], r: float | NDArray[np.float64], q: float | NDArray[np.float64]):
-    d1 = get_d1(s, k, t, iv, r, q)
-    return np.exp(-d1**2/2) / np.sqrt(2 * np.pi)
-
-
-@nb.njit(fastmath=True)
-def price_call(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], iv: float | NDArray[np.float64], r: float | NDArray[np.float64], q: float | NDArray[np.float64]):
-    d1 = get_d1(s, k, t, iv, r, q)
-    d2 = d1 - iv * np.sqrt(t)
-    return s * np.exp(-q * t) * ndtr_numba_v(d1) - k * np.exp(-r * t) * ndtr_numba_v(d2)
-
-
-@nb.njit(fastmath=True)
-def price_put(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], iv: float | NDArray[np.float64], r: float | NDArray[np.float64], q: float | NDArray[np.float64]):
-    d1 = get_d1(s, k, t, iv, r, q)
-    d2 = d1 - iv * np.sqrt(t)
-    return k * np.exp(-r * t) * ndtr_numba_v(-d2) - s * np.exp(-q * t) * ndtr_numba_v(-d1)
-
-
-@nb.njit(fastmath=True)
-def delta_call(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], iv: float | NDArray[np.float64], r: float | NDArray[np.float64], q):
-    d1 = get_d1(s, k, t, iv, r, q)
-    return np.exp(-q * t) * ndtr_numba_v(d1)
-
-
-@nb.njit(fastmath=True)
-def delta_put(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], iv: float | NDArray[np.float64], r: float | NDArray[np.float64], q):
-    d1 = get_d1(s, k, t, iv, r, q)
-    return np.exp(-q * t) * (ndtr_numba_v(d1) - 1)
-
-
-@nb.njit(fastmath=True)
-def gamma(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], iv: float | NDArray[np.float64], r: float | NDArray[np.float64], q: float | NDArray[np.float64]):
-    d1_drv = get_d1_derivative(s, k, t, iv, r, q)
-    return np.exp(-q * t) * d1_drv / (s * iv * np.sqrt(t))
-
-
-@nb.njit(fastmath=True)
-def get_vega(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], iv: float | NDArray[np.float64], r: float | NDArray[np.float64], q):
-    d1_drv = get_d1_derivative(s, k, t, iv, r, q)
-    return s * np.exp(-q * t) * np.sqrt(t) * d1_drv / 100
-
-def get_price_cuda(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], v_is_call: NDArray[int], iv: float | NDArray[np.float64], dividends: List[Dividend], calculation_date: date | NDArray[date], yield_curve:ZeroCurveData = None, equity: Equity=None, cpu=False) -> ndarray[Any, dtype[Any]]:
+def get_price_cuda(s: NDArray[np.float64], k: NDArray[np.float64], t: NDArray[float], v_is_call: NDArray[np.integer], iv: NDArray[np.float64], dividends: List[Dividend], calculation_date: date | NDArray[date], yield_curve:ZeroCurveData = None, equity: Equity=None, cpu=False) -> ndarray[Any, dtype[Any]]:
     if not isinstance(calculation_date, (date, datetime)):
         v = np.zeros_like(s)
         unique_dt, inverse = np.unique(calculation_date, return_inverse=True)
@@ -407,88 +397,174 @@ def get_price_cuda(s: float | NDArray[np.float64], k: float | NDArray[np.float64
             v[ix] = get_price_cuda(s[ix], k[ix], t[ix], v_is_call[ix], iv[ix], dividends=dividends, calculation_date=dt, yield_curve=yield_curve, equity=equity, cpu=cpu)
         return v
     else:
-        yield_curve = yield_curve or YieldCurve().get_zero_curve(calculation_date, equity)
+        yield_curve = yield_curve or YieldCurve().get_last_zero_curve(calculation_date, equity)
         div_amounts, div_times = dividends2amount_times(dividends, calculation_date)
-        if not cpu:
-            return np.array(merlin.get_v_fd_price(
-                spots=s, strikes=k, tenors=t, sigmas=iv, v_is_call=v_is_call, rates_curve=yield_curve.rates, rates_times=yield_curve.times, div_amounts=div_amounts, div_times=div_times,
-                time_steps=200, space_steps=200
-            ))
-        else:
-            return np.asarray(merlin.get_v_fd_price_cpu(
-                spots=s, strikes=k, tenors=t, sigmas=iv, v_is_call=v_is_call, rates_curve=yield_curve.rates, rates_times=yield_curve.times, div_amounts=div_amounts, div_times=div_times,
-                time_steps=200, space_steps=200
-            ))
 
-def get_delta_cuda(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], v_is_call: NDArray[int], iv: NDArray[np.float64], dividends: List[Dividend], calculation_date: date | NDArray[date], yield_curve:ZeroCurveData = None, equity: Equity=None) -> ndarray[Any, dtype[Any]]:
+        # Call the Julia function (assumes CPU mode if cpu=True; adjust for CUDA)
+        result = jl.Fino.PricingEngine.get_v_price_fd(
+            jl.Vector[jl.Float32](s.astype(np.float32)),
+            jl.Vector[jl.Float32](k.astype(np.float32)),
+            jl.Vector[jl.Float32](t.astype(np.float32)),
+            jl.Vector[jl.Float32](iv.astype(np.float32)),
+            jl.Vector[jl.UInt8]((v_is_call != 0).astype(np.uint8)),  # 0x00 for put, 0x01 for call,
+            jl.Vector[jl.Float32](np.array(yield_curve.rates).astype(np.float32)),
+            jl.Vector[jl.Float32](np.array(yield_curve.times).astype(np.float32)),
+            jl.Vector[jl.Float32](np.array(div_amounts, dtype=np.float32)),
+            jl.Vector[jl.Float32](np.array(div_times, dtype=np.float32)),
+            time_steps=200,
+            space_steps=200
+        )
+
+        # Convert back to NumPy array
+        return np.array(result, dtype=np.float64)
+
+
+
+def get_v_iv(p: NDArray, s: NDArray, k: NDArray, t: NDArray, v_is_call: NDArray[int], dividends: List[Dividend], calculation_date: date | NDArray[date]=None, yield_curve=None, equity: Equity=None) -> NDArray:
+    if not isinstance(calculation_date, date):
+        v = np.zeros_like(p)
+        unique_dt, inv = np.unique(calculation_date, return_inverse=True)
+        for i, dt in enumerate(unique_dt):
+            yield_curve = yield_curve or YieldCurve().get_zero_curve(dt)
+            div_amounts, div_times = dividends2amount_times(dividends=dividends, calculation_date=dt)
+
+            ix = inv == i
+            v[ix] = np.array(jl.Fino.PricingEngine.get_v_iv_fd(
+                jl.Vector[jl.Float32](p[ix].astype(np.float32)),
+                jl.Vector[jl.Float32](s[ix].astype(np.float32)),
+                jl.Vector[jl.Float32](k[ix].astype(np.float32)),
+                jl.Vector[jl.Float32](t[ix].astype(np.float32)),
+                jl.Vector[jl.UInt8]((v_is_call[ix] != 0).astype(np.uint8)),  # 0x00 for put, 0x01 for call,
+                jl.Vector[jl.Float32](np.array(yield_curve.rates).astype(np.float32)),
+                jl.Vector[jl.Float32](np.array(yield_curve.times).astype(np.float32)),
+                jl.Vector[jl.Float32](np.array(div_amounts, dtype=np.float32)),
+                jl.Vector[jl.Float32](np.array(div_times, dtype=np.float32)),
+                max_iter=200
+            ), dtype=np.float64)
+
+        return v
+    else:
+        yield_curve = yield_curve or YieldCurve().get_zero_curve(calculation_date, equity=equity)
+        div_amounts, div_times = dividends2amount_times(dividends=dividends, calculation_date=calculation_date)
+
+        result = jl.Fino.PricingEngine.get_v_iv_fd(
+            jl.Vector[jl.Float32](p.astype(np.float32)),
+            jl.Vector[jl.Float32](s.astype(np.float32)),
+            jl.Vector[jl.Float32](k.astype(np.float32)),
+            jl.Vector[jl.Float32](t.astype(np.float32)),
+            jl.Vector[jl.UInt8]((v_is_call != 0).astype(np.uint8)),  # 0x00 for put, 0x01 for call,
+            jl.Vector[jl.Float32](np.array(yield_curve.rates).astype(np.float32)),
+            jl.Vector[jl.Float32](np.array(yield_curve.times).astype(np.float32)),
+            jl.Vector[jl.Float32](np.array(div_amounts, dtype=np.float32)),
+            jl.Vector[jl.Float32](np.array(div_times, dtype=np.float32)),
+            # tol::Float32 = 1f-6,
+            max_iter=200,
+            # v_min::Float32 = 1f-4,
+            # v_max::Float32 = 5f0,
+            time_steps=200,
+            space_steps=200
+        )
+        return np.array(result, dtype=np.float64)
+
+# def get_v_iv_cpp(p: np.ndarray, s: np.ndarray, k: np.ndarray, t: np.ndarray, v_is_call: NDArray[int], dividends: List[Dividend] = None, calculation_date: date | NDArray[date]=None, yield_curve=None, equity: Equity=None) -> NDArray:
+#     if not isinstance(calculation_date, date):
+#         v = np.zeros_like(p)
+#         unique_dt, inv = np.unique(calculation_date, return_inverse=True)
+#         for i, dt in enumerate(unique_dt):
+#             yield_curve = yield_curve or YieldCurve().get_zero_curve(dt)
+#             div_amounts, div_times = dividends2amount_times(dividends=dividends, calculation_date=dt)
+#
+#             ix = inv == i
+#             v[ix] = np.array(merlin.get_v_iv_fd_gpu(
+#                 prices=p[ix],
+#                 spots=s[ix],
+#                 strikes=k[ix],
+#                 tenors=t[ix],
+#                 v_is_call=v_is_call[ix],
+#                 rates_curve=yield_curve.rates,
+#                 rates_times=yield_curve.times,
+#                 div_amounts=div_amounts,
+#                 div_times=div_times,
+#                 max_iter=200
+#             ))
+#
+#         return v
+#     else:
+#         yield_curve = yield_curve or YieldCurve().get_last_zero_curve(calculation_date, equity=equity)
+#         div_amounts, div_times = dividends2amount_times(dividends=dividends, calculation_date=calculation_date)
+#
+#         return np.array(merlin.get_v_iv_fd_gpu(
+#             prices=p,
+#             spots=s,
+#             strikes=k,
+#             tenors=t,
+#             v_is_call=v_is_call,
+#             rates_curve=yield_curve.rates,
+#             rates_times=yield_curve.times,
+#             div_amounts=div_amounts,
+#             div_times=div_times,
+#             max_iter=200
+#         ))
+
+# def get_delta_cuda_cpp(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[float], v_is_call: NDArray[int], iv: NDArray[np.float64], dividends: List[Dividend], calculation_date: date | NDArray[date], yield_curve:ZeroCurveData = None, equity: Equity=None) -> ndarray[float]:
+#     if not isinstance(calculation_date, date):
+#         v = np.zeros_like(s)
+#         unique_dt, inverse = np.unique(calculation_date, return_inverse=True)
+#         for i, dt in enumerate(unique_dt):
+#             ix = inverse == i
+#             v[ix] = get_delta_cuda(s[ix], k[ix], t[ix], v_is_call[ix], iv=iv[ix], dividends=dividends, calculation_date=dt, yield_curve=yield_curve, equity=equity)
+#         return v
+#     else:
+#         yield_curve = yield_curve or YieldCurve().get_last_zero_curve(calculation_date, equity)
+#         div_amounts, div_times = dividends2amount_times(dividends, calculation_date)
+#         return np.array(merlin.get_v_fd_delta(
+#             spots=s, strikes=k, tenors=t, v_is_call=v_is_call, sigmas=iv, rates_curve=yield_curve.rates, rates_times=yield_curve.times, div_amounts=div_amounts, div_times=div_times,
+#         ))
+
+# def get_vega_cuda_cpp(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[float], v_is_call: NDArray[int], iv: NDArray[np.float64], dividends: List[Dividend], calculation_date: date | NDArray[date], yield_curve:ZeroCurveData = None, equity: Equity=None) -> ndarray[float]:
+#     if not isinstance(calculation_date, date):
+#         v = np.zeros_like(s)
+#         unique_dt, inverse = np.unique(calculation_date, return_inverse=True)
+#         for i, dt in enumerate(unique_dt):
+#             ix = inverse == i
+#             v[ix] = get_vega_cuda(s[ix], k[ix], t[ix], v_is_call[ix], iv[ix], dividends=dividends, calculation_date=dt, yield_curve=yield_curve, equity=equity)
+#         return v
+#     else:
+#         yield_curve = yield_curve or YieldCurve().get_last_zero_curve(calculation_date, equity)
+#         div_amounts, div_times = dividends2amount_times(dividends, calculation_date)
+#         return np.array(merlin.get_v_fd_vega(
+#             spots=s, strikes=k, tenors=t, v_is_call=v_is_call, sigmas=iv, rates_curve=yield_curve.rates, rates_times=yield_curve.times, div_amounts=div_amounts, div_times=div_times,
+#         ))
+
+def get_delta_cuda(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[float], v_is_call: NDArray[int], iv: NDArray[np.float64], dividends: List[Dividend], calculation_date: date | NDArray[date], yield_curve:ZeroCurveData = None, equity: Equity=None) -> ndarray[float]:
+    return get_f_cuda(jl.Fino.PricingEngine.get_v_delta_fd, s, k, t, v_is_call, iv, dividends, calculation_date, yield_curve, equity)
+
+def get_vega_cuda(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[float], v_is_call: NDArray[int], iv: NDArray[np.float64], dividends: List[Dividend], calculation_date: date | NDArray[date], yield_curve:ZeroCurveData = None, equity: Equity=None) -> ndarray[float]:
+    return get_f_cuda(jl.Fino.PricingEngine.get_v_vega_fd, s, k, t, v_is_call, iv, dividends, calculation_date, yield_curve, equity)
+
+def get_f_cuda(f, s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[float], v_is_call: NDArray[int], iv: NDArray[np.float64], dividends: List[Dividend], calculation_date: date | NDArray[date], yield_curve:ZeroCurveData = None, equity: Equity=None) -> ndarray[float]:
     if not isinstance(calculation_date, date):
         v = np.zeros_like(s)
         unique_dt, inverse = np.unique(calculation_date, return_inverse=True)
         for i, dt in enumerate(unique_dt):
             ix = inverse == i
-            v[ix] = get_delta_cuda(s[ix], k[ix], t[ix], v_is_call[ix], iv=iv[ix], dividends=dividends, calculation_date=dt, yield_curve=yield_curve, equity=equity)
+            v[ix] = get_f_cuda(f, s[ix], k[ix], t[ix], v_is_call[ix], iv[ix], dividends=dividends, calculation_date=dt, yield_curve=yield_curve, equity=equity)
         return v
     else:
-        yield_curve = yield_curve or YieldCurve().get_zero_curve(calculation_date, equity)
+        yield_curve = yield_curve or YieldCurve().get_last_zero_curve(calculation_date, equity)
         div_amounts, div_times = dividends2amount_times(dividends, calculation_date)
-        return np.array(merlin.get_v_fd_delta(
-            spots=s, strikes=k, tenors=t, v_is_call=v_is_call, sigmas=iv, rates_curve=yield_curve.rates, rates_times=yield_curve.times, div_amounts=div_amounts, div_times=div_times,
+        result = np.array(f(
+            jl.Vector[jl.Float32](s.astype(np.float32)),
+            jl.Vector[jl.Float32](k.astype(np.float32)),
+            jl.Vector[jl.Float32](t.astype(np.float32)),
+            jl.Vector[jl.Float32](iv.astype(np.float32)),
+            jl.Vector[jl.UInt8]((v_is_call != 0).astype(np.uint8)),  # 0x00 for put, 0x01 for call,
+            jl.Vector[jl.Float32](np.array(yield_curve.rates).astype(np.float32)),
+            jl.Vector[jl.Float32](np.array(yield_curve.times).astype(np.float32)),
+            jl.Vector[jl.Float32](np.array(div_amounts, dtype=np.float32)),
+            jl.Vector[jl.Float32](np.array(div_times, dtype=np.float32)),
         ))
-
-def get_vega_cuda(s: float | NDArray[np.float64], k: float | NDArray[np.float64], t: float | NDArray[np.float64], v_is_call: NDArray[int], iv: NDArray[np.float64], dividends: List[Dividend], calculation_date: date | NDArray[date], yield_curve:ZeroCurveData = None, equity: Equity=None) -> ndarray[Any, dtype[Any]]:
-    if not isinstance(calculation_date, date):
-        v = np.zeros_like(s)
-        unique_dt, inverse = np.unique(calculation_date, return_inverse=True)
-        for i, dt in enumerate(unique_dt):
-            ix = inverse == i
-            v[ix] = get_vega_cuda(s[ix], k[ix], t[ix], v_is_call[ix], iv[ix], dividends=dividends, calculation_date=dt, yield_curve=yield_curve, equity=equity)
-        return v
-    else:
-        yield_curve = yield_curve or YieldCurve().get_zero_curve(calculation_date, equity)
-        div_amounts, div_times = dividends2amount_times(dividends, calculation_date)
-        return np.array(merlin.get_v_fd_vega(
-            spots=s, strikes=k, tenors=t, v_is_call=v_is_call, sigmas=iv, rates_curve=yield_curve.rates, rates_times=yield_curve.times, div_amounts=div_amounts, div_times=div_times,
-        ))
-
-
-_SQRT2 = math.sqrt(2)
-NPY_SQRT1_2 = 1.0 / np.sqrt(2)
-
-
-@njit(cache=True, fastmath=True)
-def ndtr_numba_v(arr: NDArray[np.float64]):
-    if isinstance(arr, float):
-        return ndtr_numba(arr)
-
-    res = np.zeros_like(arr)
-    for i, a in enumerate(arr):
-        res[i] = ndtr_numba(a)
-    return res
-
-
-@njit(cache=True, fastmath=True)
-def ndtr_numba(a):
-    if np.isnan(a):
-        return np.nan
-
-    x = a * NPY_SQRT1_2
-    z = fabs(x)
-
-    if (z < NPY_SQRT1_2):
-        y = 0.5 + 0.5 * erf(x)
-
-    else:
-        y = 0.5 * erfc(z)
-
-        if (x > 0):
-            y = 1.0 - y
-
-    return y
-
-
-def cdf(x):
-    """mu=0, sigma=1"""
-    return 0.5 * (1 + math.erf(x / _SQRT2))
+        return np.array(result, dtype=np.float64)
 
 
 @dataclass
@@ -543,7 +619,7 @@ def price_calcs():
               )
 
 
-def test_price_iv_price_loop():
+def trial_price_iv_price_loop(equity, v_calc_date):
     calculation_date = date(2024, 6, 26)
     s = 296.5
     # sample = TestSample(calculation_date, date(2026, 1, 16), Decimal('400.0'), OptionRight.call, price=11.50)
@@ -585,33 +661,6 @@ def test_price_iv_price_loop():
             # f'diff: {ql_price - py_price}, '
             f'Diff price: {sample.price - ql_p_of_iv_ql}, '
             )
-
-
-def speed_compare_cdf_calc():
-    from scipy.special import ndtr
-    from scipy.stats import norm
-    import timeit
-
-    for x in np.arange(-5, 5, 0.01):
-        print(f'{x}: {ndtr(x)} {ndtr(x) == norm.cdf(x) == ndtr_numba(x)}')
-        # print(f'{x}: {ndtr(x)} {ndtr(x) == norm.cdf(x) == ndtr_numba(x)}')
-
-    def cdf_slow():
-        return norm.cdf(np.arange(-5, 5, 0.1))
-
-    def cdf_fast():
-        return ndtr(np.arange(-5, 5, 0.1))
-
-    def cdf_faster():
-        return ndtr_numba_v(np.arange(-5, 5, 0.1))
-
-    n = 1_000_000
-    print(timeit.timeit('cdf_slow()', setup="from __main__ import cdf_slow", number=n), 'us')
-    # 30
-    print(timeit.timeit('cdf_fast()', setup="from __main__ import cdf_fast", number=n), 'us')
-    # 3
-    print(timeit.timeit('cdf_faster()', setup="from __main__ import cdf_faster", number=n), 'us')
-    # 3
 
 
 def _to_ql_date(d: date) -> ql.Date:
@@ -785,10 +834,28 @@ def run_american_ql_vs_cuda_tests() -> None:
             )[0]
         )
 
+        price_jl = float(
+            get_price_cuda(
+                s=np.array([spot], dtype=np.float64),
+                k=np.array([strike], dtype=np.float64),
+                t=t,
+                v_is_call=v_is_call,
+                iv=np.array([iv], dtype=np.float64),
+                dividends=cash_divs,
+                calculation_date=calculation_date,
+                yield_curve=yield_curve,
+                cpu=True,
+            )[0]
+        )
+
         pct = _pct_diff(price_ql, price_cuda)
+        pctjv = _pct_diff(price_jl, price_cuda)
         if abs(pct) > 0.1 and price_ql >= 0.01:
+            # print(
+            #     f"case={idx} spot={spot:.2f} right={right} iv={iv:.3f} K={strike:.2f} tenor={t[0]:.3f}  QL={price_ql:.6f} CUDA={price_cuda:.6f}  pct_diff(CUDA-QL)={pct:.4f}%",
+            # )
             print(
-                f"case={idx} spot={spot:.2f} right={right} iv={iv:.3f} K={strike:.2f} tenor={t[0]:.3f}  QL={price_ql:.6f} CUDA={price_cuda:.6f}  pct_diff(CUDA-QL)={pct:.4f}",
+                f"case={idx} spot={spot:.2f} right={right} iv={iv:.3f} K={strike:.2f} tenor={t[0]:.3f}  JL={price_jl:.6f} CUDA={price_cuda:.6f}  pct_diff(CUDA-JL)={pctjv:.4f}%",
             )
 
 

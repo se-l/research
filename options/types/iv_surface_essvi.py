@@ -1,9 +1,9 @@
+import os
 import time
 
 import pandas as pd
 import numpy as np
 import plotly.graph_objs as go
-import numba as nb
 
 from functools import lru_cache
 from uuid import uuid4, UUID
@@ -15,22 +15,25 @@ from typing import Dict, List, Tuple, Callable, Iterable, Literal
 from numpy._typing import NDArray
 from plotly.subplots import make_subplots
 from statsmodels.tools.eval_measures import rmse, meanabs
-from options.helper import get_tenor, get_v_iv, FV, timer, get_moneyness_fwd, date_to_sod
-from options.types.calibration_item import CalibrationItem
-from options.types.dividend import get_dividends
+from options.helper import get_tenor, timer, get_moneyness_fwd, date_to_sod, dividends2amount_times, get_pkl_cache_key # jl
+from options.types.SSVIParams import SSVISurfParams, SSVITenorParams # jl
+from options.types.calibration_item import CalibrationItem # jl
+from options.types.dividend import get_dividends # jl
 from options.types.iv_surface_model_evaluation import IVSurfaceModelEvaluation
-from options.types.option import get_price_cuda
-from options.types.enums import OptionRight
-from options.types.equity import Equity
+from options.types.enums import OptionRight, Resolution # jl
+from options.types.equity import Equity # jl
 from scipy.optimize import least_squares
+from fino.fino_load import jl
+from options.types.quote_side import QuoteSide # jl
 
-from shared.constants import EarningsPreSessionDates, DiscountRateMarket
-from shared.modules.logger import warning, info
+from shared.constants import EarningsPreSessionDates # jl
+from shared.modules.logger import warning, info # jl
+from shared.paths import Paths # jl
 from shared.plotting import show
-from shared.yield_curve import YieldCurve, ZeroCurveData
+from shared.yield_curve import YieldCurve, ZeroCurveData # jl
 
 
-@nb.jit(nopython=True, fastmath=True)
+# @nb.jit(nopython=True, fastmath=True)
 def f_essvi_total_variance(k: NDArray[np.float64] | float, theta: NDArray[np.float64] | float, rho: NDArray[np.float64] | float, psi: NDArray[np.float64] | float):
     """
     Implied total variance surface
@@ -42,7 +45,7 @@ def f_essvi_total_variance(k: NDArray[np.float64] | float, theta: NDArray[np.flo
     ) ** (1 / 2))
 
 
-@nb.jit(nopython=True, fastmath=True)
+# @nb.jit(nopython=True, fastmath=True)
 def f_essvi_iv(k: NDArray[np.float64], theta: float, rho: float, psi: float, tenor: float):
     """
     Implied total variance surface
@@ -51,7 +54,7 @@ def f_essvi_iv(k: NDArray[np.float64], theta: float, rho: float, psi: float, ten
     return (f_essvi_total_variance(k, theta, rho, psi) / tenor) ** (1 / 2)
 
 
-@nb.njit(fastmath=True)
+# @nb.njit(fastmath=True)
 def f_min(x, u, y, f=f_essvi_total_variance, weights=None):
     theta, rho, psi = x
     k = u
@@ -88,7 +91,7 @@ def jac_price_surface_theta_rho_ps(
         tenor_offsets,
         dividends,
         calculation_date,
-        diff_step: float
+        diff_step: float,
 ):
     """
     Central-difference (3-point) Jacobian using one GPU batch call.
@@ -100,6 +103,7 @@ def jac_price_surface_theta_rho_ps(
     Then:
       J[:, j] = (r(x+h_j) - r(x-h_j)) / (2*h_j)
     """
+    from options.types.option import get_price_cuda
     x = np.asarray(calibration_params, dtype=np.float64)
     n_params = x.size
     n_opt = len(t)
@@ -244,7 +248,7 @@ def jac_price_surface_theta_rho_ps(
 #
 #     return J
 
-def _key_from_x(x: np.ndarray) -> bytes:
+def _key_from_x(x: NDArray) -> bytes:
     x = np.asarray(x, dtype=np.float64)
     return x.tobytes()
 
@@ -252,7 +256,8 @@ def f_min_price_surface_theta_rho_psi(
         calibration_params: List[float],
         equity: Equity,
         bids, asks, s, k, t, v_is_call, zero_rates: ZeroCurveData, tenor_offsets: List[Tuple[int, int]],
-        dividends, calculation_date, diff_step) -> np.ndarray[float]:
+        dividends, calculation_date, diff_step) -> NDArray[float]:
+    from options.types.option import get_price_cuda
 
     n = len(t)
     v_theta = np.empty(n, dtype=np.float64)
@@ -271,7 +276,7 @@ def f_min_price_surface_theta_rho_psi(
     v_variance = f_essvi_total_variance(mny_fwd_ln, v_theta, v_rho, v_psi) / t
     v_variance[(v_variance < 0) | np.isnan(v_variance)] = 0  # Becomes 0 IV -> intrinsic value price. Avoids warning "invalid value encountered in sqrt"
     model_iv = np.sqrt(v_variance)
-    # impute np.nan with zero - bad assumption that we dont get infinitely high IVs from above, but rather just negative / nan.
+    # impute np.nan with zero - bad assumption that we don't get infinitely high IVs from above, but rather just negative / nan.
     model_iv[np.isnan(model_iv)] = 0  # returns intrinsic price...
 
     # Here, a small batch size is processed only, CPU faster
@@ -349,7 +354,7 @@ def logistic_spread_weighted_residuals(
     residuals = e * w
     return residuals, w, u, beta
 
-@nb.njit(fastmath=True)
+# @nb.njit(fastmath=True)
 def fill_nan_residuals(residuals: np.ndarray) -> np.ndarray:
     ix_nan = np.isnan(residuals) | np.isinf(residuals)
     res_max = np.abs(residuals[~ix_nan])
@@ -360,12 +365,12 @@ def fill_nan_residuals(residuals: np.ndarray) -> np.ndarray:
     return residuals
 
 
-@nb.njit(fastmath=True)
+# @nb.njit(fastmath=True)
 def f_gj(theta: float, rho: float):
     return 4 * theta / (1 + abs(rho))
 
 
-@nb.njit(fastmath=True)
+# @nb.njit(fastmath=True)
 def convert_rho_b_c2theta_rho_psi(model_params: NDArray[np.float64], n_tenors: int) -> Tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     v_f = np.empty(n_tenors)
     v_p = np.empty(n_tenors)
@@ -457,16 +462,14 @@ class DataPointSSVIOverTime:
 
 class IVSurface:
     """
-    Enrich a frame with index ts, expiry, strike, right
-    So plotting is easy
+    Enrich a frame with index ts, expiry, strike, right. So plotting is easy.
     """
-
     def __init__(self, underlying: Equity, tag: str = ''):
         self.id = uuid4()
         self.underlying = underlying
         self.is_calibrated = False
         self.calibration_items: Dict[date, CalibrationItem] = {}
-        self.params: Dict[date, Tuple] = {}
+        self.params: SSVISurfParams = SSVISurfParams()
         self.rmse_iv: Dict[date, Tuple] = {}
         self.evaluation: IVSurfaceModelEvaluation = None
         self.tag = tag
@@ -485,19 +488,18 @@ class IVSurface:
             fit_res = least_squares(f_min, initial_params, args=(item.mny_fwd_ln, total_variance, f_essvi_total_variance, item.weights), verbose=verbose, max_nfev=1000)
 
             self.calibration_items[item.tenor_dt] = item
-            self.params[item.tenor_dt] = fit_res.x
+            self.params[item.tenor_dt] = SSVITenorParams(*fit_res.x)
             self.rmse_iv[item.tenor_dt] = fit_res.cost
 
             if fit_res.cost > plot_cost_gt:
                 warning(f'Calibration failed for {self.underlying} tenor={item.tenor_dt} cost: {fit_res.cost}, calcDate={item.calculation_date}')
-                self.plot_smile(item.tenor_dt, item.calculation_date)
 
         info(f'Calibration done for {self.underlying} rmse(iv)={np.mean(list(self.rmse_iv.values()))}')
         self.is_calibrated = True
 
         return self
 
-    def set_params(self, params: Dict[date, Tuple[float, float, float]]):
+    def set_params(self, params: SSVISurfParams):
         self.params = params
         self.is_calibrated = True
         return self
@@ -522,6 +524,7 @@ class IVSurface:
             self.plot_prices(tenor_dt, calc_date, calibration_items_bid, calibration_items_ask, fn=fn, open_browser=open_browser)
 
     def plot_prices(self, tenor_dt: date, calc_date: date, calibration_items_bid=None, calibration_items_ask=None, fn=None, open_browser=True):
+        from options.types.option import get_price_cuda
         dividends = self.calibration_items[tenor_dt].dividends
 
         params = self.params[tenor_dt]
@@ -556,6 +559,7 @@ class IVSurface:
         show(fig, fn=fn or f'essvi_{self.underlying}_{tenor_dt}.html', open_browser=open_browser)
 
     def plot_surface_calibration_items(self, fn=None, open_browser=True, samples_by_tenor=None):
+        from options.types.option import get_v_iv
         fig = go.Figure()
         v_mny = []
         v_tenor = []
@@ -570,8 +574,6 @@ class IVSurface:
                 s=v.spot,
                 k=v.strike.astype(float),
                 t=np.array([tenor] * len(v.mny_fwd_ln)),
-                r=DiscountRateMarket,
-                rights=v.rights,
                 dividends=get_dividends(self.underlying.symbol.upper(), v.calculation_date),
                 calculation_date=v.calculation_date,
             ).tolist()
@@ -585,174 +587,6 @@ class IVSurface:
             zaxis_title='Implied Volatility', ),
                           )
         show(fig, fn=fn_plot, open_browser=open_browser)
-
-    def plot_surface_residual_price_parity(self, mny_bin_size: float = 0.05, fn: str | None = None, open_browser: bool = True):
-        """
-        Plot a heatmap of put-call parity residuals in price space and log residual stats by right/expiry/moneyness bucket.
-
-        Parity residual per pair:
-            r_parity = (C_obs - P_obs) - DF * (F0 - K)
-        where F0 and DF are inferred from inputs used to compute observed prices:
-            - F0 = spot * exp((r - q)*T) with q implied from dividends schedule via options.helper.dividends2amount_times
-            - DF = exp(-r*T)
-        We pair calls and puts by (expiry, strike) within each calibration item.
-
-        Parameters:
-            mny_bin_size: bucket size for log-forward-moneyness
-            fn: output html filename for the heatmap
-            open_browser: whether to open the plot in a browser
-        """
-        if not self.is_calibrated or not self.calibration_items:
-            warning('Surface not calibrated or no calibration items present.')
-            return
-
-        # Collect per-point residuals and coordinates
-        rows = []
-
-        for tenor_dt, item in self.calibration_items.items():
-            # Inputs
-            tenor = item.tenor
-            calc_date = item.calculation_date
-
-            # Effective q(t) via discrete dividends -> compute forward F = S*exp(rT) - PV(dividends) approx:
-            # We reuse get_price_cuda's convention, but for parity we need DF and F.
-            # Compute DF and forward in a way consistent with pricing:
-            DF = np.exp(-r * tenor)
-            F0 = FV(item.spot, t0=np.asarray([calc_date]*len(item.spot)), t1=np.asarray([tenor_dt]*len(item.spot)), dividends=item.dividends)
-
-            strikes = item.strike.astype(float)
-            rights = np.asarray(item.rights)
-            prices = np.asarray(item.price)
-            mny = np.asarray(item.mny_fwd_ln)
-
-            v_iv = self.iv(item.mny_fwd_ln, tenor_dt, calc_date)
-            prices_model = get_price_cuda(s=item.spot, k=item.strike, t=np.asarray([item.tenor] * len(item.strike)), iv=v_iv, dividends=item.dividends, calculation_date=item.calculation_date, equity=self.underlying)
-
-            # Build maps by strike for calls and puts
-            is_call = rights == OptionRight.call
-            is_put = rights == OptionRight.put
-
-            if not (is_call.any() and is_put.any()):
-                continue
-
-            # Pair by exact strike match
-            # Use indices per strike for speed
-            call_idx_by_k = {}
-            for i in np.where(is_call)[0]:
-                k = strikes[i]
-                call_idx_by_k.setdefault(k, []).append(i)
-
-            put_idx_by_k = {}
-            for i in np.where(is_put)[0]:
-                k = strikes[i]
-                put_idx_by_k.setdefault(k, []).append(i)
-
-            common_ks = sorted(set(call_idx_by_k.keys()).intersection(put_idx_by_k.keys()))
-            if not common_ks:
-                continue
-
-            for K in common_ks:
-                # Use first match per strike to avoid overweighting duplicates
-                ic = call_idx_by_k[K][0]
-                ip = put_idx_by_k[K][0]
-
-                C_obs = prices[ic]
-                P_obs = prices[ip]
-                # Parity residual
-                r_parity = (C_obs - P_obs) - DF * (F0 - K)
-                r_parity_model = (prices_model[ic] - prices_model[ip]) - DF * (F0 - K)
-
-                # Use moneyness of the call leg (they are the same strike/expiry)
-                k_log_fwd = mny[ic]
-                # Bucket the moneyness
-                k_bucket = (k_log_fwd // mny_bin_size) * mny_bin_size
-
-                rows.append({
-                    'tenor_dt': tenor_dt,
-                    'tenor': tenor,
-                    'right_call': OptionRight.call,
-                    'right_put': OptionRight.put,
-                    'strike': K,
-                    'k': k_log_fwd,
-                    'k_bucket': k_bucket,
-                    'residual': r_parity,
-                    'residual_model': r_parity_model,
-                })
-
-        df_res = pd.DataFrame(rows)
-
-        # Use built-ins: mean of abs via two-step transform + agg
-        df_heat = (
-            df_res
-            .assign(mean_residuals=lambda d: d['residual'].apply(lambda lst: np.mean(lst)))
-            .assign(median_residuals=lambda d: d['residual'].apply(lambda lst: np.median(lst)))
-            .assign(mean_residuals_model=lambda d: d['residual_model'].apply(lambda lst: np.mean(lst)))
-            .assign(median_residuals_model=lambda d: d['residual_model'].apply(lambda lst: np.median(lst)))
-            .groupby(['tenor_dt', 'k_bucket'], as_index=False)
-            .agg(tenor=('tenor', 'first'),
-                 median_residual=('median_residuals', lambda x: np.median(np.array(x))),
-                 mean_residual=('mean_residuals', lambda x: np.mean(np.array(x))),
-                 model_median_residual=('median_residuals_model', lambda x: np.median(np.array(x))),
-                 model_mean_residual=('mean_residuals_model', lambda x: np.mean(np.array(x))),
-                 count=('residual', len),
-                 )
-        )
-
-        # Build heatmap grid
-        # Sort axes
-        x_vals = sorted(df_heat['k_bucket'].unique())
-        y_vals = sorted(df_heat['tenor'].unique())
-        x_index = {x: i for i, x in enumerate(x_vals)}
-        y_index = {y: i for i, y in enumerate(y_vals)}
-        z_mat = np.full((len(y_vals), len(x_vals)), np.nan)
-        for _, row in df_heat.iterrows():
-            xi = x_index[row['k_bucket']]
-            yi = y_index[row['tenor']]
-            z_mat[yi, xi] = row['median_residual']
-
-        # Plotly heatmap
-        fig = go.Figure(data=go.Heatmap(
-            x=x_vals,
-            y=y_vals,
-            z=z_mat,
-            colorscale='RdBu',
-            colorbar=dict(title='Median |parity residual|'),
-            zmid=0
-        ))
-        fig.update_layout(
-            title='Put-Call Parity Residuals (price) by tenor and log-forward-moneyness bucket',
-            xaxis_title='Log forward moneyness bucket',
-            yaxis_title='Tenor (years)',
-        )
-        show(fig, fn=fn or f'parity_residual_heatmap_{self.underlying}.html', open_browser=False)
-
-        z_mat = np.full((len(y_vals), len(x_vals)), np.nan)
-        for _, row in df_heat.iterrows():
-            xi = x_index[row['k_bucket']]
-            yi = y_index[row['tenor']]
-            z_mat[yi, xi] = row['model_median_residual']
-
-        fig2 = go.Figure(data=go.Heatmap(
-            x=x_vals,
-            y=y_vals,
-            z=z_mat,
-            colorscale='RdBu',
-            colorbar=dict(title='Median |parity residual|'),
-            zmid=0
-        ))
-        fig2.update_layout(
-            title='Model Put-Call Parity Residuals (price) by tenor and log-forward-moneyness bucket',
-            xaxis_title='Log forward moneyness bucket',
-            yaxis_title='Tenor (years)',
-        )
-        show(fig2, fn='model_' + fn or f'model_parity_residual_heatmap_{self.underlying}.html', open_browser=False)
-
-
-        info('Put-Call parity residual summary (per expiry, mny bucket):')
-        for _, r in df_heat.iterrows():
-            info(f"tenor={r['tenor']:.4f}, k_bucket={r['k_bucket']:.3f}, mean={r['median_residual']:.4g}, mae={r['mean_residual']:.4g}, mae={r['model_mean_residual']:.4g}, mae={r['model_mean_residual']:.4g}, n={int(r['count'])}")
-
-        return df_heat
 
 
     def plot_surface_vanilla(self, calc_date1=date(2024, 3, 11), expiries: List[date] = None) -> go.Figure:
@@ -797,9 +631,9 @@ class IVSurface:
         fig = make_subplots(rows=3, cols=1, subplot_titles=subs)
         p_dct = {k: v for k, v in self.params.items()}
         x = [get_tenor(k, calc_date) for k in p_dct.keys()]
-        theta = [v[0] for k, v in p_dct.items()]
-        rho = [v[1] for k, v in p_dct.items()]
-        psi = [v[2] for k, v in p_dct.items()]
+        theta = [v.theta for k, v in p_dct.items()]
+        rho = [v.rho for k, v in p_dct.items()]
+        psi = [v.psi for k, v in p_dct.items()]
         fig.add_trace(go.Scatter(x=x, y=theta, mode='markers', marker=dict(size=4), name=f'Theta'), row=1, col=1)
         fig.add_trace(go.Scatter(x=x, y=rho, mode='markers', marker=dict(size=4), name=f'Rho'), row=2, col=1)
         fig.add_trace(go.Scatter(x=x, y=psi, mode='markers', marker=dict(size=4), name=f'Psi'), row=3, col=1)
@@ -814,7 +648,7 @@ class IVSurface:
     #         return None
     #     o.npv(iv, s0, calc_date) * q * 100
 
-    def iv(self, moneyness_fwd_ln: float | NDArray[np.float64], tenor: date, calc_date: date) -> NDArray[np.float64] | float:
+    def iv(self, moneyness_fwd_ln: float | NDArray[np.float64], tenor: date, calc_date: datetime) -> NDArray[np.float64] | float:
         """
         Interpolating IV from the frame.
         """
@@ -889,45 +723,45 @@ class IVSurface:
     def next_release_date(self, calc_date: date) -> date:
         return next(iter([d for d in EarningsPreSessionDates(self.underlying.symbol) if d >= calc_date]), date.max)
 
-    def calibrate_surface_arb_free(self, samples: Dict[date, CalibrationItem], verbose=True):
-        self._validate_calibration_samples(samples)
-        t0 = time.time()
-        tenors = sorted(samples.keys())
-        n_tenors = len(tenors)
-
-        # theta0, rho, a, c
-        model_params = [0.05]  # theta0
-        model_params += [0] * n_tenors  # rho
-        model_params += [1e-3] * (n_tenors - 1)  # a
-        model_params += [0.5] * n_tenors  # c
-        model_params = np.array(model_params)
-
-        bounds_left = [0]
-        bounds_left += [-1] * n_tenors
-        bounds_left += [0] * (n_tenors - 1)
-        bounds_left += [-1] * n_tenors
-
-        bounds_right = [np.inf]
-        bounds_right += [1] * n_tenors
-        bounds_right += [np.inf] * (n_tenors - 1)
-        bounds_right += [1] * n_tenors
-
-        n_residuals = sum([len(item.iv) for item in samples.values()])
-        fit_res = least_squares(f_min_reparameterized, model_params, args=(samples, get_price_cuda, n_residuals), verbose=verbose, max_nfev=1000,
-                                bounds=(bounds_left, bounds_right)
-                                )
-        info(f'Calibrated arb free in {time.time() - t0:.2f}sec for {self.underlying}')
-
-        v_theta, v_rho, v_psi = convert_rho_b_c2theta_rho_psi(fit_res.x, len(samples))
-
-        for i, (tenor_dt, item) in enumerate(samples.items()):
-            self.calibration_items[item.tenor_dt] = item
-            self.params[item.tenor_dt] = (v_theta[i], v_rho[i], v_psi[i])
-
-        self.is_calibrated = True
-        self.evaluate()
-
-        return self
+    # def calibrate_surface_arb_free(self, samples: Dict[date, CalibrationItem], verbose=True):
+    #     self._validate_calibration_samples(samples)
+    #     t0 = time.time()
+    #     tenors = sorted(samples.keys())
+    #     n_tenors = len(tenors)
+    #
+    #     # theta0, rho, a, c
+    #     model_params = [0.05]  # theta0
+    #     model_params += [0] * n_tenors  # rho
+    #     model_params += [1e-3] * (n_tenors - 1)  # a
+    #     model_params += [0.5] * n_tenors  # c
+    #     model_params = np.array(model_params)
+    #
+    #     bounds_left = [0]
+    #     bounds_left += [-1] * n_tenors
+    #     bounds_left += [0] * (n_tenors - 1)
+    #     bounds_left += [-1] * n_tenors
+    #
+    #     bounds_right = [np.inf]
+    #     bounds_right += [1] * n_tenors
+    #     bounds_right += [np.inf] * (n_tenors - 1)
+    #     bounds_right += [1] * n_tenors
+    #
+    #     n_residuals = sum([len(item.iv) for item in samples.values()])
+    #     fit_res = least_squares(f_min_reparameterized, model_params, args=(samples, get_price_cuda, n_residuals), verbose=verbose, max_nfev=1000,
+    #                             bounds=(bounds_left, bounds_right)
+    #                             )
+    #     info(f'Calibrated arb free in {time.time() - t0:.2f}sec for {self.underlying}')
+    #
+    #     v_theta, v_rho, v_psi = convert_rho_b_c2theta_rho_psi(fit_res.x, len(samples))
+    #
+    #     for i, (tenor_dt, item) in enumerate(samples.items()):
+    #         self.calibration_items[item.tenor_dt] = item
+    #         self.params[item.tenor_dt] = SSVITenorParams(v_theta[i], v_rho[i], v_psi[i])
+    #
+    #     self.is_calibrated = True
+    #     self.evaluate()
+    #
+    #     return self
 
     @staticmethod
     def _validate_calibration_samples(items: Dict[date, CalibrationItem]):
@@ -946,12 +780,94 @@ class IVSurface:
         return True
 
     @timer
-    def calibrate_surface(
+    def calibrate_surface_py(
             self,
             equity: Equity,
             samples: Dict[date, CalibrationItem],
             calc_date: date,
             verbose: int = 1, max_nfev=1000,
+            x0_in: Dict[date, List[float]] = None,
+            min_max_mny_fwd_ln = (-0.3, 0.3)
+    ):
+        """
+        Optimize by passing good x0 starting conditions
+        """
+        self._validate_calibration_samples(samples)
+        t0 = time.time()
+        if not samples:
+            warning(f'No samples for {self.underlying}')
+            return self
+
+        zero_rates = YieldCurve().get_last_zero_curve(calc_date, equity, -14)
+        tenors = sorted(samples.keys())
+        n_tenors = len(tenors)
+        x0 = {t: x0_in.get(t, [0.05, -0.1, 0.1]) for t in tenors}
+
+        calibration_params = [x for d in sorted(x0) for x in x0[d]]
+        # theta (ATM impl var), rho (ATM slope), psi (ATM curvature)
+
+        vals = samples.values()
+        mny_fwd_ln = np.array(list(chain(*[i.mny_fwd_ln for i in vals])))
+        ix_mny = (min_max_mny_fwd_ln[0] < mny_fwd_ln) & (mny_fwd_ln < min_max_mny_fwd_ln[1])
+
+        bids = np.array(list(chain(*[i.bid_price for i in vals])))[ix_mny]
+        asks = np.array(list(chain(*[i.ask_price for i in vals])))[ix_mny]
+        # item_prices = np.array(list(chain(*[i.price for i in vals])))[ix_mny]
+        s = np.array(list(chain(*[i.spot for i in vals])))[ix_mny]
+        k = np.array(list(chain(*[i.strike for i in vals])))[ix_mny]
+        t = np.array(list(chain(*[[i.tenor] * len(i.strike) for i in vals])))[ix_mny]
+        v_is_call = np.array(list(chain(*[[1 if r == OptionRight.call else 0 for r in i.rights] for i in vals])))[ix_mny]
+
+        tenor_index = np.array(list(chain(*[[i]*len(el.strike) for i, el in enumerate(vals)])))[ix_mny]
+        n = len(tenor_index)
+        tenor_offsets = []
+        for i in range(n_tenors):
+            bool_ix = tenor_index == i
+            tenor_offsets.append((np.argmax(bool_ix), n - np.argmax(bool_ix[::-1])))
+
+        dividends = next((i.dividends for i in vals if i.dividends is not None), [])
+        calculation_date: date = next((i.calculation_date for i in vals if i.calculation_date is not None), None)
+
+        diff_step = 0.01
+        try:
+            fit_res = least_squares(
+                fun=f_min_price_surface_theta_rho_psi,
+                x0=calibration_params,
+                jac=jac_price_surface_theta_rho_ps,
+                args=(equity, bids, asks, s, k, t, v_is_call, zero_rates, tenor_offsets, dividends, calculation_date, diff_step),
+                verbose=verbose,
+                max_nfev=max_nfev,
+                diff_step=diff_step,  # None -> super tiny 1e-6 or sth value. Small IV, change, small price. too tiny epsilon wouldnt reflect in residuals.
+                # loss='huber',
+                bounds=([0, -np.inf, -np.inf] * n_tenors, [np.inf, np.inf, np.inf] * n_tenors)  # ensure theta > 0
+            )
+        except ValueError as ex:
+            pass
+        info(f'Calibrated {self.underlying}. # tenors: {n_tenors}. # samples: {len(s)}. # params: {len(calibration_params)} max_nfev={max_nfev} in {time.time() - t0:.2f}sec. Had x0={len(x0_in or {}) > 0}')
+
+        self.v_calibrated_params = fit_res.x
+
+        for i, (tenor_dt, item) in enumerate(samples.items()):
+            theta = fit_res.x[i * 3]
+            rho = fit_res.x[i * 3 + 1]
+            psi = fit_res.x[i * 3 + 2]
+
+            self.calibration_items[item.tenor_dt] = item
+            self.params[item.tenor_dt] = SSVITenorParams(theta, rho, psi)
+
+        self.is_calibrated = True
+        # pprint(self.evaluate())
+
+        return self
+
+    @timer
+    def calibrate_surface(
+            self,
+            equity: Equity,
+            samples: Dict[date, CalibrationItem],
+            calc_date: date,
+            verbose: int = 0,
+            max_nfev = 1000,
             x0_in: Dict[date, List[float]] = None,
             min_max_mny_fwd_ln = (-0.3, 0.3)
             ):
@@ -992,114 +908,49 @@ class IVSurface:
             tenor_offsets.append((np.argmax(bool_ix), n - np.argmax(bool_ix[::-1])))
 
         dividends = next((i.dividends for i in vals if i.dividends is not None), [])
-        calculation_date = next((i.calculation_date for i in vals if i.calculation_date is not None), None)
+        calculation_date: date = next((i.calculation_date for i in vals if i.calculation_date is not None), None)
 
         diff_step = 0.01
-        try:
-            fit_res = least_squares(
-                fun=f_min_price_surface_theta_rho_psi,
-                x0=calibration_params,
-                jac=jac_price_surface_theta_rho_ps,
-                args=(equity, bids, asks, s, k, t, v_is_call, zero_rates, tenor_offsets, dividends, calculation_date, diff_step),
-                verbose=verbose,
-                max_nfev=max_nfev,
-                diff_step=diff_step,  # None -> super tiny 1e-6 or sth value. Small IV, change, small price. too tiny epsilon wouldnt reflect in residuals.
-                loss='huber',
-                bounds=([0, -np.inf, -np.inf] * n_tenors, [np.inf, np.inf, np.inf] * n_tenors)  # ensure theta > 0
-            )
-        except ValueError as ex:
-            pass
-        info(f'Calibrated {self.underlying}. # tenors: {n_tenors}. # samples: {len(s)}. # params: {len(calibration_params)} max_nfev={max_nfev} in {time.time() - t0:.2f}sec. Had x0={len(x0_in or {}) > 0}')
+        div_amounts, div_times = dividends2amount_times(dividends, calculation_date)
+        mny_fwd_ln = np.log(get_moneyness_fwd(equity, k, s, t, date_to_sod(calculation_date), zero_rates))
+        res, _ = jl.Fino.CalibrateIVS.calibrate_surface(
+            jl.Vector[jl.Float32](np.array(calibration_params, dtype=np.float32)),
+            jl.Vector[jl.Float32](bids.astype(np.float32)),
+            jl.Vector[jl.Float32](asks.astype(np.float32)),
+            jl.Vector[jl.Float32](s.astype(np.float32)),
+            jl.Vector[jl.Float32](k.astype(np.float32)),
+            jl.Vector[jl.Float32](t.astype(np.float32)),
+            jl.Vector[jl.UInt8]((v_is_call != 0).astype(np.uint8)),
+            jl.Vector[jl.Float32](mny_fwd_ln.astype(np.float32)),
+            jl.Vector[jl.Tuple[jl.Int64, jl.Int64]](tenor_offsets),
+            jl.Vector[jl.Float32](np.array(zero_rates.rates, dtype=np.float32)),
+            jl.Vector[jl.Float32](np.array(zero_rates.times, dtype=np.float32)),
+            jl.Vector[jl.Float32](np.array(div_amounts, dtype=np.float32)),
+            jl.Vector[jl.Float32](np.array(div_times, dtype=np.float32)),
+            diff_step=np.float32(diff_step),
+            max_nfev=1000,
+            verbose=verbose == 1
+        )
+        res = np.array(res, dtype=np.float32)
+        info(f'Jl calibrated {self.underlying}. # tenors: {n_tenors}. # samples: {len(s)}. # params: {len(calibration_params)} max_nfev={max_nfev} in {time.time() - t0:.2f}sec. Had x0={len(x0_in or {}) > 0}')
 
-        self.v_calibrated_params = fit_res.x
+        self.v_calibrated_params = res
 
         for i, (tenor_dt, item) in enumerate(samples.items()):
-            theta = fit_res.x[i * 3]
-            rho = fit_res.x[i * 3 + 1]
-            psi = fit_res.x[i * 3 + 2]
+            theta = res[i * 3]
+            rho = res[i * 3 + 1]
+            psi = res[i * 3 + 2]
 
             self.calibration_items[item.tenor_dt] = item
-            self.params[item.tenor_dt] = (theta, rho, psi)
+            self.params[item.tenor_dt] = SSVITenorParams(theta, rho, psi)
 
         self.is_calibrated = True
         # pprint(self.evaluate())
 
         return self
 
-    # @timer
-    # def calibrate_surface_old(self, samples: Dict[date, CalibrationItem], verbose: int = 1, max_nfev=1000, x0_in: Dict[date, List[float]] = None, min_max_mny_fwd_ln = (-0.3, 0.3)):
-    #     """
-    #     Optimize by passing good x0 starting conditions
-    #     """
-    #     self._validate_calibration_samples(samples)
-    #     t0 = time.time()
-    #     if not samples:
-    #         warning(f'No samples for {self.underlying}')
-    #         return self
-    #
-    #     tenors = sorted(samples.keys())
-    #     n_tenors = len(tenors)
-    #
-    #     x0 = {**(x0_in or {})}
-    #     for t in tenors:
-    #         if t not in x0:
-    #             x0[t] = [0.05, -0.1, 0.1]
-    #     calibration_params = [x for d in sorted(x0) for x in x0[d]]
-    #     # theta (ATM impl var), rho (ATM slope), psi (ATM curvature)
-    #
-    #     vals = samples.values()
-    #     mny_fwd_ln = np.array(list(chain(*[i.mny_fwd_ln for i in vals])))
-    #     ix_mny = (min_max_mny_fwd_ln[0] < mny_fwd_ln) & (mny_fwd_ln < min_max_mny_fwd_ln[1])
-    #
-    #     mny_fwd_ln = mny_fwd_ln[ix_mny]
-    #     bids = np.array(list(chain(*[i.bid_price for i in vals])))[ix_mny]
-    #     asks = np.array(list(chain(*[i.ask_price for i in vals])))[ix_mny]
-    #     # item_prices = np.array(list(chain(*[i.price for i in vals])))[ix_mny]
-    #     s = np.array(list(chain(*[i.spot for i in vals])))[ix_mny]
-    #     k = np.array(list(chain(*[i.strike for i in vals])))[ix_mny]
-    #     t = np.array(list(chain(*[[i.tenor] * len(i.strike) for i in vals])))[ix_mny]
-    #     v_is_call = np.array(list(chain(*[[1 if r == OptionRight.call else 0 for r in i.rights] for i in vals])))[ix_mny]
-    #
-    #     tenor_index = np.array(list(chain(*[[i]*len(el.strike) for i, el in enumerate(vals)])))[ix_mny]
-    #     n = len(tenor_index)
-    #     tenor_offsets = []
-    #     for i in range(n_tenors):
-    #         bool_ix = tenor_index == i
-    #         tenor_offsets.append((np.argmax(bool_ix), n - np.argmax(bool_ix[::-1])))
-    #
-    #     dividends = next((i.dividends for i in vals if i.dividends is not None), [])
-    #     calculation_date = next((i.calculation_date for i in vals if i.calculation_date is not None), None)
-    #
-    #     diff_step = 0.01
-    #     fit_res = least_squares(
-    #         fun=f_min_price_surface_theta_rho_psi,
-    #         x0=calibration_params,
-    #         jac=jac_price_surface_theta_rho_ps,
-    #         args=(bids, asks, s, k, t, v_is_call, mny_fwd_ln, tenor_offsets, dividends, calculation_date, diff_step),
-    #         verbose=verbose,
-    #         max_nfev=max_nfev,
-    #         diff_step=diff_step,  # None -> super tiny 1e-6 or sth value. Small IV, change, small price. too tiny epsilon wouldnt reflect in residuals.
-    #         loss='huber',
-    #         bounds=([0, -np.inf, -np.inf] * n_tenors, [np.inf, np.inf, np.inf] * n_tenors)  # ensure theta > 0
-    #     )
-    #     info(f'Calibrated {self.underlying}. # tenors: {n_tenors}. # samples: {len(s)}. # params: {len(calibration_params)} max_nfev={max_nfev} in {time.time() - t0:.2f}sec. Had x0={len(x0_in or {}) > 0}')
-    #
-    #     self.v_calibrated_params = fit_res.x
-    #
-    #     for i, (tenor_dt, item) in enumerate(samples.items()):
-    #         theta = fit_res.x[i * 3]
-    #         rho = fit_res.x[i * 3 + 1]
-    #         psi = fit_res.x[i * 3 + 2]
-    #
-    #         self.calibration_items[item.tenor_dt] = item
-    #         self.params[item.tenor_dt] = (theta, rho, psi)
-    #
-    #     self.is_calibrated = True
-    #     # pprint(self.evaluate())
-    #
-    #     return self
-
     def evaluate(self, mny_bin_size=0.05, min_max_mny_fwd_ln=(-0.3, 0.3)) -> IVSurfaceModelEvaluation | None:
+        from options.types.option import get_price_cuda
         if not self.is_calibrated:
             return None
 
@@ -1141,6 +992,7 @@ class IVSurface:
                     dividends=item.dividends,
                     calculation_date=item.calculation_date,
                     equity=self.underlying,
+                    yield_curve=YieldCurve().get_last_zero_curve(item.calculation_date, self.underlying, -14),
                 )
 
                 if item.bid_price is not None and item.ask_price is not None:
@@ -1194,7 +1046,7 @@ class IVSurface:
                         dividends=item.dividends,
                         calculation_date=item.calculation_date,
                         equity=self.underlying,
-                        yield_curve=YieldCurve().get_zero_curve(calculation_date=item.calculation_date, equity=self.underlying)
+                        yield_curve=YieldCurve().get_last_zero_curve(calculation_date=item.calculation_date, equity=self.underlying, delta_days=-14)
                     )
 
                     if item.bid_price is not None and item.ask_price is not None:
@@ -1248,11 +1100,16 @@ class IVSurface:
 
     @property
     def datapoints(self) -> List[DataPointSSVIOverTime]:
+        # backwards comparible. Delete later
+        if not isinstance(self.params, SSVISurfParams):
+            self.params = SSVISurfParams({k: SSVITenorParams(*v) for k, v in self.params.items()})
+
         values = []
         calc_date = self.first_calibration_calc_date()
         ts_end = self.last_calibration_ts()
 
-        for tenor_dt, (theta, rho, psi) in self.params.items():
+        for tenor_dt, sSVITenorParams in self.params.items():
+            theta, rho, psi = sSVITenorParams
             tenor = get_tenor(tenor_dt, calc_date)
             values += [
                 DataPointSSVIOverTime(self.id, self.underlying.symbol, tenor_dt, tenor, MetricSSVI.theta, theta, ts_end),
@@ -1262,10 +1119,14 @@ class IVSurface:
         return values
 
     def last_calibration_ts(self) -> datetime:
-        if not hasattr(self, '_last_calibration_ts') or not self._last_calibration_ts:
-            np_ts = max([ci.ts[-1] for ci in self.calibration_items.values() if ci is not None and len(ci.ts) > 0])
-            self._last_calibration_ts = pd.Timestamp(np_ts).to_pydatetime()
-        return self._last_calibration_ts
+        try:
+            if not hasattr(self, '_last_calibration_ts') or not self._last_calibration_ts:
+                np_ts = max([ci.ts[-1] for ci in self.calibration_items.values() if ci is not None and len(ci.ts) > 0])
+                self._last_calibration_ts = pd.Timestamp(np_ts).to_pydatetime()
+            return self._last_calibration_ts
+        except Exception as ex:
+            warning(f'last_calibration_ts(): {ex}')
+            return datetime(1970, 1, 1)
 
     def set_last_calibration_ts(self, ts: datetime):
         self._last_calibration_ts = ts
@@ -1273,6 +1134,13 @@ class IVSurface:
     def first_calibration_calc_date(self) -> date:
         obj = next(iter(self.calibration_items.values()), None)
         return obj.calculation_date if obj is not None else date.min
+
+    @classmethod
+    def is_cached(cls, equity: Equity, dates: List[date], resolution: Resolution|str = Resolution.second, seq_ret_threshold: float = 0.002, arb_free=False, seq_ret_threshold_surface=None) -> bool:
+        root = Paths.path_analysis_frames
+        payload = 'v_ivs', equity, dates, resolution, seq_ret_threshold, QuoteSide.mid, arb_free, seq_ret_threshold_surface
+        fn = get_pkl_cache_key(*payload)
+        return os.path.exists(os.path.join(root, fn))
 
 
 def plot_ssvi_params_over_time(v_ivs: Iterable[IVSurface], fn=None, open_browser=True):

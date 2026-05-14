@@ -53,13 +53,13 @@ class OptionContract(Security):
         strike = Decimal(strike) / 10000
         return cls(symbol, symbol, expiry, strike, option_right, issue_date)
 
-    def csv_name(self, tick_type: TickType, resolution: Resolution, dt: datetime.date = None):
+    def csv_name(self, tick_type: TickType|str, resolution: Resolution|str, dt: datetime.date = None):
         if resolution in (Resolution.minute, Resolution.second, Resolution.tick) and dt:  # for minute, second, tick
             return f'{dt.strftime(dt_fmt_ymd)}_{self.symbol}_{resolution}_{tick_type}_{self.option_style}_{self.right}_{int(self.strike * 10000)}_{self.expiry.strftime(dt_fmt_ymd)}.csv'.lower()
         else:
             return f'{self.underlying_symbol}_{tick_type}_{self.option_style}_{self.right}_{int(self.strike * 10000)}_{self.expiry.strftime(dt_fmt_ymd)}.csv'.lower()
 
-    def zip_name(self, tick_type: TickType, resolution: Resolution, dt: datetime.date = None):
+    def zip_name(self, tick_type: TickType|str, resolution: Resolution|str, dt: datetime.date = None):
         if dt is None:
             raise ValueError('date must be provided')
         return self.get_zip_name(self.underlying_symbol, tick_type, resolution, dt)
@@ -76,7 +76,7 @@ class OptionContract(Security):
         return price * q * self.multiplier
 
     @staticmethod
-    def get_zip_name(underlying_symbol: str, tick_type: TickType, resolution: Resolution, date: datetime.date):
+    def get_zip_name(underlying_symbol: str, tick_type: TickType|str, resolution: Resolution|str, date: datetime.date):
         if resolution in (Resolution.daily, Resolution.hour):
             if tick_type in (TickType.iv_quote, TickType.iv_trade):
                 return f'{underlying_symbol}_{date.year}_{tick_type.split("_")[1]}_american_iv.zip'.lower()

@@ -29,11 +29,6 @@ from options.types.iv_surface_essvi import IVSurface, MetricSSVI
 from shared.plotting import show
 
 
-moneyness_fit = 'moneyness_fwd_ln'
-min_mny = -0.3
-max_mny = 0.3
-
-
 def get_ivs_mp(sym_dates: List[SymDate], scope: ScopePrePost | str = ScopePrePost.all, arb_free=False, mp=False) -> List[IVSurface]:
     payloads = []
     for sym_date in sym_dates:
@@ -60,7 +55,7 @@ def get_ivs_mp(sym_dates: List[SymDate], scope: ScopePrePost | str = ScopePrePos
     return [x for x in list(chain(*res))]
 
 
-def scope_df(x: pd.DataFrame, start_ts=None, end_ts=None):
+def scope_df(x: pd.DataFrame, start_ts=None, end_ts=None, moneyness_fit = 'moneyness_fwd_ln', min_mny = -0.3, max_mny = 0.3):
     df = x.copy()
     df = df[(df[moneyness_fit] < max_mny) & (df[moneyness_fit] > min_mny)]
     if start_ts:
@@ -254,16 +249,17 @@ def v_ivs_to_weighted_metrics(v_ivs: List[IVSurface]) -> SSVISurfParams:
     total_sample = 0
     for ivs in v_ivs:
         for tenor, ci in ivs.calibration_items.items():
-            theta[tenor] = ivs.params[tenor][0] * len(ci.price)
-            rho[tenor] = ivs.params[tenor][1] * len(ci.price)
-            psi[tenor] = ivs.params[tenor][2] * len(ci.price)
+            ivs.params = SSVISurfParams({k: SSVITenorParams(*v) if isinstance(v, tuple) else v for k, v in ivs.params.items()})
+            theta[tenor] = ivs.params[tenor].theta * len(ci.price)
+            rho[tenor] = ivs.params[tenor].rho * len(ci.price)
+            psi[tenor] = ivs.params[tenor].psi * len(ci.price)
             total_sample += len(ci.price)
     inst = SSVISurfParams()
     for dt in theta.keys():
         inst[dt] = SSVITenorParams(theta[dt]/total_sample, rho[dt]/total_sample, psi[dt]/total_sample)
     return inst
 
-def v_ivs_to_x0(v_ivs: List[IVSurface]) -> Dict[date, List[float]]:
+def v_ivs_to_x0(v_ivs: List[IVSurface]|Tuple) -> Dict[date, List[float]]:
     out = defaultdict(list)
     count = defaultdict(int)
     for ivs in v_ivs:
@@ -273,7 +269,7 @@ def v_ivs_to_x0(v_ivs: List[IVSurface]) -> Dict[date, List[float]]:
                 count[tenor] = len(ci.price)
     return out
 
-def get_calibration_items(calc_date: date, df_q: pd.DataFrame, dividends: List[Dividend], side: QuoteSide, df_t: pd.DataFrame = None) -> List[CalibrationItem]:
+def get_calibration_items(calc_date: date, df_q: pd.DataFrame, dividends: List[Dividend], side: QuoteSide|str, df_t: pd.DataFrame = None) -> List[CalibrationItem]:
     if side == QuoteSide.mid:
         # calibration_items_fill = df2calibration_items(df_t, calc_date, iv_col_nm='fill_iv', price_col_nm='close', spot_col_nm='spot', rf=rate, dividends=dividends,
         #                                               weight_col_nm=None, vega_col_nm='vega_fill_iv')
@@ -300,7 +296,7 @@ def get_calibration_items(calc_date: date, df_q: pd.DataFrame, dividends: List[D
 
 @timer
 def df_qt2surface(equity: Equity, df_q: pd.DataFrame, df_t: pd.DataFrame, calc_date: date, side: QuoteSide | str = QuoteSide.mid, arb_free=False,
-                  x0_ivs: List[IVSurface] = (), n_samples_per_tenor=1000) -> IVSurface | None:
+                  x0_ivs: List[IVSurface]|Tuple = (), n_samples_per_tenor=1000) -> IVSurface | None:
     sym = equity.symbol.lower()
     dividends = get_dividends(sym, start=calc_date)
 
@@ -353,7 +349,7 @@ def get_df_qt(option_frame: OptionFrame, equity: Equity, dates: List[date]):
 
 
 @cache_to_disk('v_ivs', Paths.path_analysis_frames)
-def get_ivs_by_date(equity: Equity, dates: List[date], resolution: Resolution, seq_ret_threshold: float, side='mid', arb_free=False, seq_ret_threshold_surface=None) -> List[IVSurface]:
+def get_ivs_by_date(equity: Equity, dates: List[date], resolution: Resolution, seq_ret_threshold: float, side=QuoteSide.mid, arb_free=False, seq_ret_threshold_surface=None) -> List[IVSurface]:
     info(f'get_ivs_by_date(): {equity} - {",".join((d.isoformat() for d in dates))}')
     option_frame = get_option_frame(equity, dates, resolution=resolution, seq_ret_threshold=seq_ret_threshold)
     df_q, df_t = get_df_qt(option_frame, equity, dates)

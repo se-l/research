@@ -27,7 +27,7 @@ class Equity(Security):
         if resolution in (Resolution.minute, Resolution.second, Resolution.tick) and date:  # for minute, second, tick
             return f'{date.strftime("%Y%m%d")}_{self.symbol.lower()}_{resolution}_{tick_type}.csv'
         else:
-            return f'{self.symbol}.csv'
+            return f'{self.symbol.lower()}.csv'
 
     def zip_name(self, tick_type: TickType, resolution: Resolution, date: datetime.date = None):
         if resolution in (Resolution.daily, Resolution.hour):
