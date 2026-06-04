@@ -8,10 +8,10 @@ using CSV
 using ..Paths
 
 export Dividend, get_dividends, fetch_dividends, load_from_disk, get_dividend_amount_times
-
+# TODO - move this out of code. Infer.
 const NO_DIVIDENDS = Set(["PANW", "ONON", "XPO", "PATH", "CDNS", "BIDU", "CBRE",
     "CRWD", "DLTR", "DOCU", "KMX", "LI", "MDB", "MRNA",
-    "NEOG", "NFLX", "ON", "PDD", "PLTR", "SNOW", "WDAY", "ZK"])
+    "NEOG", "NFLX", "ON", "PDD", "PLTR", "SNOW", "WDAY", "ZK", "ESLT", "PDD"])
 
 mutable struct Dividend
     ticker::String

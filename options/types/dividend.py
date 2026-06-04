@@ -13,7 +13,8 @@ from shared.modules.logger import info, error
 from shared.paths import Paths, mkdir
 
 NO_DIVIDEDNS = {'PANW', 'ONON', 'XPO', 'PATH', 'CDNS', 'BIDU', 'CBRE', 'CDNS', 'CRWD', 'DLTR', 'DOCU', 'KMX', 'LI', 'MDB',
-                'MRNA', 'NEOG', 'NFLX', 'ON', 'ONON', 'PANW', 'PATH', 'PDD', 'PLTR', 'SNOW', 'WDAY', 'XPO', 'ZK'}
+                'MRNA', 'NEOG', 'NFLX', 'ON', 'ONON', 'PANW', 'PATH', 'PDD', 'PLTR', 'SNOW', 'WDAY', 'XPO', 'ZK', "ESLT",
+                "PDD"}
 
 
 @dataclass

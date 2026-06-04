@@ -2,7 +2,7 @@ using Dates
 using Serialization
 using Distributions
 using HTTP
-using HTTP.WebSockets: send, receive
+using HTTP.WebSockets
 using Logging
 using ProtoBuf
 
@@ -134,7 +134,9 @@ function send_response(websocket, msg::MessagePb, payload::Vector{UInt8}, cache_
     end
     
     # Serialize and send - adjust based on your WebSocket library
-    send(websocket, pb2bytes(response))
+    lock(WS_SEND_LOCK) do
+        HTTP.WebSockets.send(websocket, pb2bytes(response))
+    end
 end
 
 
@@ -145,7 +147,9 @@ function send_empty_response(websocket, msg, payload::Vector{UInt8}; reason::Str
     """
     @info "$reason. Sending empty response."
     response = MessagePb(msg.channel, msg.id, ActionPb.SUBSCRIBE, isempty(payload) ? UInt8[] : payload)
-    send(websocket, pb2bytes(response))
+    lock(WS_SEND_LOCK) do
+        HTTP.WebSockets.send(websocket, pb2bytes(response))
+    end
 end
 
 """
@@ -231,9 +235,9 @@ function StressTestDsResult2StressTestDsResult_pb(res::StressTestDsResult, reque
         res.delta_total,
         res.delta_total_across_ds,
         res.weighted_dnlv,
-        Dict(string(sec) => v for (sec, v) in res.marginal_utility_by_holding),
+        Dict(string(h.symbol) => v for (h, v) in res.marginal_utility_by_holding),
         res.total_objective,
-        Dict(string(sec) => v for (sec, v) in res.marginal_weighted_objective_by_holding),
+        Dict(string(h.symbol) => v for (h, v) in res.marginal_weighted_objective_by_holding),
     )
 end
 

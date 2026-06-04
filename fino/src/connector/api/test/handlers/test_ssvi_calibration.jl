@@ -1,8 +1,6 @@
 # test_ssvi_calibration.jl
 
-using Pkg
-Pkg.activate("C:\\repos\\research\\fino")
-#include("src\\Fino.jl")
+include(joinpath(@__DIR__, "src\\init.jl"))
 
 using Serialization
 using Fino: Paths, Security, Holding, SecurityType, security_type_equity, security_type_option, option_right_call, option_right_put, OptionRight, Option

@@ -477,7 +477,7 @@ class IVSurface:
         self.v_calibrated_params: NDArray = None
 
     def __repr__(self):
-        return f'IVS_SSVI_{self.underlying.symbol}_{self.tag}_{self.last_calibration_ts().isoformat()}'
+        return f'IVS_SSVI_{self.underlying.symbol}_{self.tag}{"_" + self.last_calibration_ts().isoformat() if self._last_calibration_ts else ''}'
 
     def calibrate(self, calibration_items: List[CalibrationItem], verbose=1, initial_params=None, plot_cost_gt=10):
         initial_params = initial_params or [0.2, -0.1, 2]
@@ -590,13 +590,11 @@ class IVSurface:
 
 
     def plot_surface_vanilla(self, calc_date1=date(2024, 3, 11), expiries: List[date] = None) -> go.Figure:
-        _expiries = expiries or [date(2024, 3, 15), date(2024, 3, 22), date(2024, 3, 28), date(2024, 4, 5), date(2024, 4, 12), date(2024, 4, 19), date(2024, 4, 26),
-                                 date(2024, 5, 17), date(2024, 6, 21), date(2024, 7, 19), date(2024, 8, 16), date(2024, 9, 20), date(2024, 12, 20), date(2025, 1, 17),
-                                 date(2025, 6, 20), date(2025, 12, 19), date(2026, 1, 16)]
         fig = go.Figure()
         x = np.linspace(-0.2, 0.2, 100)
         y = []
         z = []
+        _expiries = expiries or sorted(self.params.keys())
         for tenor_dt in _expiries:
             z += list(self.iv(x, tenor_dt, calc_date1))
             y += [get_tenor(tenor_dt, calc_date1)] * len(x)
@@ -913,6 +911,7 @@ class IVSurface:
         diff_step = 0.01
         div_amounts, div_times = dividends2amount_times(dividends, calculation_date)
         mny_fwd_ln = np.log(get_moneyness_fwd(equity, k, s, t, date_to_sod(calculation_date), zero_rates))
+
         res, _ = jl.Fino.CalibrateIVS.calibrate_surface(
             jl.Vector[jl.Float32](np.array(calibration_params, dtype=np.float32)),
             jl.Vector[jl.Float32](bids.astype(np.float32)),
@@ -946,6 +945,14 @@ class IVSurface:
 
         self.is_calibrated = True
         # pprint(self.evaluate())
+
+        # IVSurface("Tst").set_last_calibration_ts(calculation_date).set_params(self.params).plot_surface_vanilla(calculation_date)
+        # plot_calibration_surface_debug(
+        #     bids, asks, mny_fwd_ln, t, v_is_call, tenor_offsets, tenors,
+        #     self.params,
+        #     title=f"{equity.symbol} — before calibration",
+        #     fn=f"debug_{equity.symbol}_before.html",
+        # )
 
         return self
 
@@ -1119,17 +1126,18 @@ class IVSurface:
         return values
 
     def last_calibration_ts(self) -> datetime:
-        try:
-            if not hasattr(self, '_last_calibration_ts') or not self._last_calibration_ts:
-                np_ts = max([ci.ts[-1] for ci in self.calibration_items.values() if ci is not None and len(ci.ts) > 0])
-                self._last_calibration_ts = pd.Timestamp(np_ts).to_pydatetime()
-            return self._last_calibration_ts
-        except Exception as ex:
-            warning(f'last_calibration_ts(): {ex}')
-            return datetime(1970, 1, 1)
+        # try:
+        if not hasattr(self, '_last_calibration_ts') or not self._last_calibration_ts:
+            np_ts = max([ci.ts[-1] for ci in self.calibration_items.values() if ci is not None and len(ci.ts) > 0])
+            self._last_calibration_ts = pd.Timestamp(np_ts).to_pydatetime()
+        return self._last_calibration_ts
+        # except Exception as ex:
+        #     warning(f'last_calibration_ts(): {ex}')
+        #     return datetime(1970, 1, 1)
 
     def set_last_calibration_ts(self, ts: datetime):
         self._last_calibration_ts = ts
+        return self
 
     def first_calibration_calc_date(self) -> date:
         obj = next(iter(self.calibration_items.values()), None)
@@ -1167,3 +1175,99 @@ def plot_ssvi_params_over_time(v_ivs: Iterable[IVSurface], fn=None, open_browser
 
         fig.update_layout(title=f'{underlying} SSVI params (t)', autosize=True)
         show(fig, fn=fn or f'essvi_{underlying}_params_params_{from_}-{to}.html', open_browser=open_browser)
+
+def plot_calibration_surface_debug(
+        bids: np.ndarray,
+        asks: np.ndarray,
+        mny_fwd_ln: np.ndarray,
+        t: np.ndarray,
+        v_is_call: np.ndarray,
+        tenor_offsets: list,
+        tenors: list,
+        calibration_params: list,
+        title: str = "Calibration Debug",
+        fn: str = "calibration_debug.html",
+        open_browser: bool = True,
+        plot_bid_ask_band: bool = False,
+):
+    """
+    Plot bid/ask market quotes vs SSVI model IV per tenor slice.
+    Designed to be called inside calibrate_surface() before/after the solver.
+
+    Parameters
+    ----------
+    bids, asks       : flat filtered price arrays (already moneyness-filtered)
+    mny_fwd_ln       : flat log-forward-moneyness array
+    t                : flat tenor array (years)
+    tenor_offsets    : list of (start, end) index pairs per tenor
+    tenors           : sorted list of tenor_dt dates (same order as tenor_offsets)
+    calibration_params : flat [theta, rho, psi, ...] per tenor
+    """
+    from options.types.option import get_price_cuda
+
+    mid = 0.5 * (bids + asks)
+    fig = make_subplots(
+        rows=len(tenors), cols=1,
+        subplot_titles=[str(td) for td in tenors],
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+    )
+
+    for i, (tenor_dt, (start, end)) in enumerate(zip(tenors, tenor_offsets)):
+        row = i + 1
+        mny_sl = mny_fwd_ln[start:end]
+        mid_sl = mid[start:end]
+        bid_sl = bids[start:end]
+        ask_sl = asks[start:end]
+        t_sl = t[start:end]
+
+        tenor_val = float(t_sl[0]) if len(t_sl) > 0 else 0.0
+        theta = calibration_params[i * 3 + 0]
+        rho = calibration_params[i * 3 + 1]
+        psi = calibration_params[i * 3 + 2]
+
+        # SSVI model IV on a smooth moneyness grid
+        x_grid = np.linspace(mny_sl.min(), mny_sl.max(), 200)
+        iv_model_grid = f_essvi_iv(x_grid, theta, rho, psi, tenor=tenor_val)
+
+        # Back out IV from market mid prices for scatter
+        from options.types.option import get_v_iv
+        iv_mid = get_v_iv(
+            p=mid_sl,
+            s=np.full_like(mid_sl, mid_sl.mean()),  # spot approximation; replace if available
+            k=np.exp(mny_sl) * mid_sl.mean(),  # approximate; replace with actual k slice if passed
+            v_is_call=v_is_call,
+            t=t_sl,
+            dividends=[],
+            calculation_date=tenor_dt,
+        )
+
+        sort_ix = np.argsort(mny_sl)
+        x_sorted = mny_sl[sort_ix]
+
+        # Bid/ask band
+        if plot_bid_ask_band:
+            fig.add_trace(go.Scatter(
+                x=np.concatenate([x_sorted, x_sorted[::-1]]),
+                y=np.concatenate([ask_sl[sort_ix], bid_sl[sort_ix][::-1]]),
+                fill='toself', fillcolor='rgba(100,150,255,0.15)',
+                line=dict(color='rgba(0,0,0,0)'),
+                name=f'{tenor_dt} bid/ask band', showlegend=(i == 0),
+            ), row=row, col=1)
+
+        # Market mid IV
+        fig.add_trace(go.Scatter(
+            x=x_sorted, y=iv_mid[sort_ix],
+            mode='markers', marker=dict(size=3, color='blue'),
+            name='market mid IV', showlegend=(i == 0),
+        ), row=row, col=1)
+
+        # SSVI model IV
+        fig.add_trace(go.Scatter(
+            x=x_grid, y=iv_model_grid,
+            mode='lines', line=dict(color='red', width=1),
+            name='SSVI model', showlegend=(i == 0),
+        ), row=row, col=1)
+
+    fig.update_layout(title=title, height=300 * len(tenors))
+    show(fig, fn=fn, open_browser=open_browser)

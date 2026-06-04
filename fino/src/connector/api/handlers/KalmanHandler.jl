@@ -14,7 +14,7 @@ using Logging
 using Serialization
 using Base.Threads
 using LinearAlgebra
-using ...Fino: Equity, trade_days_between_dates, resolution_second, run_on_py_thread
+using ...Fino
 using ..WS
 
 # ============================================================================
@@ -88,7 +88,7 @@ function get_kalman_init(req::RequestKalmanInitPb)::Tuple{Vector{Vector{UInt8}},
     dt_end = Date(req.date_fit_end, DT_FMT_PB)
     trade_days = trade_days_between_dates(dt_start, dt_end)
 
-    py_dates = pylist([pydate(year(d), month(d), day(d)) for d in trade_days])
+    py_dates = pylist([Fino.pydate(year(d), month(d), day(d)) for d in trade_days])
 
     py_resolution_second = py_enums.Resolution.second
     py_v_ivs = py_surfaces.get_v_ivs(

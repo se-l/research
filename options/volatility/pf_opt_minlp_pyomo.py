@@ -34,13 +34,10 @@ def derive_portfolio_milnp(
         m_dnlv01_buy: np.ndarray,
         m_dnlv01_sell: np.ndarray,
         cfg: EarningsConfig,
-        pdf_t_params= (2.46172191,  1.41911933, -0.27650936,  4.2197843),
-        weight_max_t_curve=5,
         f_weight_ds=None,
         pf: Portfolio = None,
         tee=True,
-        weight_wing_lift: float = 0.0,
-        upward_sloping_wings: bool = False
+        upward_sloping_wings: bool = True
 ) -> PfMilnpResult:
     """
         Define an objective function   d NLV = -f(T, K, right)
@@ -78,7 +75,7 @@ def derive_portfolio_milnp(
 
     # Constants T curve related
     v_ds_pct = [100 * (x - 1) for x in cfg.v_ds_ret]
-    y = get_density_for_bimodal_t_dist(np.array(v_ds_pct), *pdf_t_params)
+    y = get_density_for_bimodal_t_dist(np.array(v_ds_pct), *cfg.solver_t_params)
     y_scaled = y / max(y)
     i_ds_eq_0 = list(cfg.v_ds_ret).index(1)
 
@@ -114,9 +111,9 @@ def derive_portfolio_milnp(
     m.dnlv_where_ds_eq_0 = m.t[i_ds_eq_0]
     m.y_desired_dnlv = y_scaled * m.dnlv_where_ds_eq_0
     m.nlv_mn_t_curve = m.t - m.y_desired_dnlv
-    if weight_wing_lift:
-        info(f'Lifting wings by {100*weight_wing_lift}% of t curve at 0 ds.')
-        m.nlv_mn_t_curve = m.nlv_mn_t_curve - m.t[i_ds_eq_0] * weight_wing_lift  # last term lifts the wings up. student t underestimates tails.
+    if cfg.weight_wing_lift:
+        info(f'Lifting wings by {100*cfg.weight_wing_lift}% of t curve at 0 ds.')
+        m.nlv_mn_t_curve = m.nlv_mn_t_curve - m.t[i_ds_eq_0] * cfg.weight_wing_lift  # last term lifts the wings up. student t underestimates tails.
 
     # Constraints
 
@@ -162,7 +159,7 @@ def derive_portfolio_milnp(
     # Objectives.
     # from pyomo.contrib.preprocessing import deactivate_trivial_constraints
 
-    m.obj = pyo.Objective(expr=m.var_max_t_curve * weight_max_t_curve + pyo.summation(m.v_var_nlv_lt_t_curve), sense=pyo.maximize)
+    m.obj = pyo.Objective(expr=m.var_max_t_curve * cfg.weight_max_t_curve + pyo.summation(m.v_var_nlv_lt_t_curve), sense=pyo.maximize)
     # m.obj = pyo.Objective(expr=sum(m.t) + m.var_max_t_curve + pyo.summation(m.v_var_nlv_lt_t_curve), sense=pyo.maximize)
     info(f'Solving for #Options: {n_options}, #Contracts: {cfg.n_contracts}')
     # log_infeasible_constraints(m, logger=logger, log_expression=True, log_variables=True)

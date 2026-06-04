@@ -1,8 +1,6 @@
 # test_ssvi_calibration.jl
 
-using Pkg
-Pkg.activate("C:\\repos\\research\\fino")
-#include("src\\Fino.jl")
+include(joinpath(@__DIR__, "src\\init.jl"))
 
 using Serialization
 using Fino: Paths, Security, Holding, SecurityType, security_type_equity, security_type_option, option_right_call, option_right_put, OptionRight, Option,
@@ -19,8 +17,7 @@ using Fino.WS: parse_pb, RequestStressTestDsPb, StressTestDsHandler, MessagePb, 
 # ============================================================
 # Load cached req
 # ============================================================
-fn = raw"RequestStressTestDs-FDX-2025-12-18T155900-c31d9ddcd902a3a2aafb60f15272d10bdb31f1ecd25e4ea301cf43f7c20b0585.bin"
-fn = raw"RequestStressTestDs-FDX-2025-12-18T093734-2eeb3a5a9aa0e3776de865d97cfbe58148b920fa2259e24a1c1e4a7b0199985e.bin"
+fn = raw"RequestStressTestDs-CRWD-2026-06-03T134424-f49d5798f8e70dd5e2aad89b9b330e44c8e073e06c07e72c16398b73231ac321.bin"
 fp = joinpath(Paths.PATH_API_CACHE, fn)
 
 @info "Loading cached req from: $fp"

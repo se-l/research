@@ -14,7 +14,9 @@ using StaticArrays
 
 using CUDA
 CUDA.functional()
-const CUDA_AVAILABLE = true
+const CUDA_AVAILABLE = CUDA.functional()
+
+const RATE_SCHED_STRIDE = Int32(257) # store [0..N_t] inclusive
 
 # ────────────────────────────────────────────────────────────────────────────
 # Rate curve helpers
@@ -206,8 +208,6 @@ function _safe_div_pv(div_amounts, div_times, T, rates_curve, rates_times)
 end
 
 if CUDA.functional()
-
-    const RATE_SCHED_STRIDE = Int32(257) # store [0..N_t] inclusive
 
     function _build_rate_sched_kernel!(
     unique_tenors, n_unique::Int32,

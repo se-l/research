@@ -10,8 +10,7 @@ using SHA
 using ...DividendManager
 using ...PricingEngine
 using ...YieldCurve: get_last_zero_curve
-using ...Fino: CalibrationItem, Option, SSVISurfParams, SSVITenorParams, Equity, SecurityType, security_type_option, union_calibration_items, date_to_eod,
-        CalibrateIVS, option_from_ib_symbol, get_v_tenor, get_moneyness_fwd_ln, date_to_sod, option_right_call, option_right_put
+using ...Fino
 using ..WS
 
 const BACKGROUND_TASKS = Set{Task}()

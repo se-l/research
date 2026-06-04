@@ -221,6 +221,27 @@ end
 # Core curve construction
 # ─────────────────────────────────────────────────────────────────────────────
 
+function _get_latest_available_curve(from_date::Date, market::String,
+                                     max_days::Int=180)::ZeroCurveData
+    for offset in 1:max_days
+        candidate = from_date - Day(offset)
+        _initialize!(market, candidate)
+        bills = get(_bill_rates, candidate, Dict{Float32, Float32}())
+        pars  = get(_par_yields,  candidate, Dict{Float32, Float32}())
+        if !isempty(bills) || !isempty(pars)
+            @info "get_zero_curve(): rates unavailable for $from_date, using $candidate instead"
+            combined = Dict{Float32, Float32}(bills)
+            bill_max = isempty(bills) ? 0f0 : maximum(keys(bills))
+            for (t, r) in pars
+                t > bill_max && (combined[t] = r)
+            end
+            sorted_tenors = sort(collect(keys(combined)))
+            return ZeroCurveData(sorted_tenors, [combined[t] for t in sorted_tenors])
+        end
+    end
+    return ZeroCurveData()
+end
+
 """
     get_zero_curve(calculation_date, ticker="", market="usa") -> ZeroCurveData
 
@@ -248,11 +269,15 @@ function get_zero_curve(calculation_date::Date,
         pars  = get(_par_yields,  calculation_date, Dict{Float32, Float32}())
 
         if isempty(bills) && isempty(pars)
-            _zero_curve_cache[cache_key] = ZeroCurveData()
-            return ZeroCurveData()
+            # Rates not yet published for this date — fall back to the most
+            # recent date for which we do have data (up to 14 calendar days back).
+            fallback_result = _get_latest_available_curve(calculation_date, market)
+            _zero_curve_cache[cache_key] = fallback_result
+            return fallback_result
         end
 
-        combined = Dict{Float32, Float32}(bills)   # bills are already zero rates
+        combined = Dict{Float32, Float32}(bills)
+
         bill_max = isempty(bills) ? 0f0 : maximum(keys(bills))
         for (t, r) in pars
             t > bill_max && (combined[t] = r)

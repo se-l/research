@@ -18,7 +18,6 @@ if not jl.seval('isdefined(Main, :Fino)'):
     jl.seval('using Fino')
 
 info(f"Julia active project: {jl.seval('Base.active_project()')}")
-# info("Julia LOAD_PATH:", jl.seval("LOAD_PATH"))
 info("Fino package loaded successfully")
 
 

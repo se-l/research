@@ -156,7 +156,7 @@ class YieldCurve:
             pars = self._par_yields.get(calculation_date, {})
 
             if not bills and not pars:
-                return ZeroCurveData(times=[], rates=[])
+                return self._get_latest_available_curve(calculation_date, market)
 
             # Start with bills as zero rates (usually <= 1 year)
             combined_zero_rates = {t: r for t, r in bills.items()}
@@ -174,35 +174,54 @@ class YieldCurve:
             rates=[float(curve[t]) for t in sorted_tenors]
         )
 
+    def _get_latest_available_curve(self, from_date: date, market: str, max_days: int = 180) -> ZeroCurveData:
+        for offset in range(1, max_days + 1):
+            candidate = from_date - timedelta(days=offset)
+            self.initialize(candidate, market)
+            bills = self._bill_rates.get(candidate, {})
+            pars = self._par_yields.get(candidate, {})
+            if bills or pars:
+                info(f'get_zero_curve(): rates unavailable for {from_date}, using {candidate} instead')
+                combined = {t: r for t, r in bills.items()}
+                bill_max = max(bills.keys(), default=0)
+                combined.update({t: r for t, r in pars.items() if t > bill_max})
+                sorted_tenors = sorted(combined.keys())
+                return ZeroCurveData(
+                    times=[float(t) for t in sorted_tenors],
+                    rates=[float(combined[t]) for t in sorted_tenors]
+                )
+        return ZeroCurveData(times=[], rates=[])
+
+
     def bootstrap_to_zero_rates(self, par_yields: List[Tuple[float, float]]) -> Dict[float, float]:
-        zero_rates = {}
-        sorted_par = sorted(par_yields, key=lambda x: x[0])
+            zero_rates = {}
+            sorted_par = sorted(par_yields, key=lambda x: x[0])
 
-        for t, c in sorted_par:
-            if t <= 1.0:
-                zero_rates[t] = c
-            else:
-                # Treasury bonds pay semi-annually. We need PV of all coupons at 0.5, 1.0, 1.5 ... t
-                coupon = c / 2.0
-                pv_coupons = 0.0
-
-                # Number of semi-annual payments
-                num_payments = int(round(t * 2))
-                for i in range(1, num_payments):
-                    payment_time = i * 0.5
-                    # Interpolate the zero rate for the payment time
-                    z_i = self.interpolate_zero_rate(zero_rates, payment_time)
-                    pv_coupons += coupon / ((1 + z_i / 2.0) ** (2 * payment_time))
-
-                remaining_price = 1.0 - pv_coupons
-                if remaining_price <= 0:
+            for t, c in sorted_par:
+                if t <= 1.0:
                     zero_rates[t] = c
-                    continue
+                else:
+                    # Treasury bonds pay semi-annually. We need PV of all coupons at 0.5, 1.0, 1.5 ... t
+                    coupon = c / 2.0
+                    pv_coupons = 0.0
 
-                z_n = 2.0 * (((1.0 + coupon) / remaining_price) ** (1.0 / (2.0 * t)) - 1.0)
-                zero_rates[t] = z_n
+                    # Number of semi-annual payments
+                    num_payments = int(round(t * 2))
+                    for i in range(1, num_payments):
+                        payment_time = i * 0.5
+                        # Interpolate the zero rate for the payment time
+                        z_i = self.interpolate_zero_rate(zero_rates, payment_time)
+                        pv_coupons += coupon / ((1 + z_i / 2.0) ** (2 * payment_time))
 
-        return zero_rates
+                    remaining_price = 1.0 - pv_coupons
+                    if remaining_price <= 0:
+                        zero_rates[t] = c
+                        continue
+
+                    z_n = 2.0 * (((1.0 + coupon) / remaining_price) ** (1.0 / (2.0 * t)) - 1.0)
+                    zero_rates[t] = z_n
+
+            return zero_rates
 
     def interpolate_zero_rate(self, zero_rates: Dict[float, float], t: float) -> float:
         """Linear interpolation of zero rates."""
@@ -230,4 +249,4 @@ class YieldCurve:
         plt.show()
 
 if __name__ == "__main__":
-    print(YieldCurve().get_zero_curve(date(2025, 12, 24)))
+    print(YieldCurve().get_zero_curve(date(2026, 5, 28), Equity("SNOW")))

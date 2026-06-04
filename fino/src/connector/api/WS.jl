@@ -4,7 +4,10 @@ using PythonCall
 using HTTP
 using HTTP.WebSockets
 
-const EARNINGS_IV_DROP_REGRESSOR_MODEL_NAME_VERSION="f_20260407-205754"
+const EARNINGS_IV_DROP_REGRESSOR_MODEL_NAME_VERSION="f_20260516-230556"
+const WS_SEND_LOCK = ReentrantLock()
+const ROOT_RESEARCH = dirname(dirname(dirname(@__DIR__)))
+const ROOT_TRADE = joinpath(dirname(ROOT_RESEARCH), "trade", "src")
 
 # ── Python imports (module-level, initialised once) ──────────────────────────
 const py_surfaces            = PythonCall.pynew()
@@ -21,7 +24,7 @@ function ensure_py_initialized()
     _py_initialized[] && return
 
     sys = pyimport("sys")
-    for repo_root in [dirname(dirname(dirname(dirname(dirname(@__DIR__))))), "C:\\repos\\trade\\src"]
+    for repo_root in [dirname(dirname(dirname(dirname(dirname(@__DIR__))))), ROOT_TRADE]
         if !pyconvert(Bool, sys.path.__contains__(repo_root))
             sys.path.insert(0, repo_root)
         end
@@ -77,7 +80,7 @@ include(joinpath(@__DIR__, "common.jl"))
 export parse_pb, holding2holding_pb, is_response_cached, cache_request, cache_result, send_response, load_response_from_cache,
     send_empty_response, get_density_for_bimodal_t_dist, holdings_pb2portfolio, get_mid_iv_from_cache, get_ordered_holdings, pb2bytes,
     get_cache_key_if_not_present, convert_py_sec2jl_sec2, StressTestDsResult2StressTestDsResult_pb, py2stress_inputs, py2jl_holdings,
-    HoldingPb
+    HoldingPb, WS_SEND_LOCK
 include(joinpath(@__DIR__, "handlers", "AbstractHandler.jl"))
     export spawn_task, DT_FMT_PB
 
@@ -103,13 +106,13 @@ using .WsMsgBroker
 # ============================================
 
 """
-    start_ws(; host="127.0.0.1", port=8002)
+    start_ws(; host="0.0.0.0", port=8002)
 Start the WebSocket server.
 # Arguments
-- `host::String`: Server host address (default: "127.0.0.1")
+- `host::String`: Server host address (default: "0.0.0.0")
 - `port::Int`: Server port (default: 8002)
 """
-function start_ws(; host::String="127.0.0.1", port::Int=8002)
+function start_ws(; host::String="0.0.0.0", port::Int=8002)
     @info "[WS] Starting server on http://$host:$port"
     HTTP.listen(host, port) do stream
         req = stream.message

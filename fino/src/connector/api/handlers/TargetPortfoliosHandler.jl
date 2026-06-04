@@ -11,11 +11,7 @@ using UUIDs
 using SparseArrays
 using LinearAlgebra
 using ..WS
-using ...Fino: Portfolio, AbstractEarningsReleaseSimulation, PyEarningsReleaseSimulation,
-               Holding, EarningsConfig, Option, Equity, next_release_date,
-               StressTestDsResult, get_stress_test_ds, holdings2v_q, get_nlv_by_ds, option_from_ib_symbol,
-               get_assumed_fill_iv, SolverResult, solve, log_marginal_utility, run_on_py_thread, py_ers_mod,
-                from_holding_pb
+using ...Fino
 
 # ============================================================================
 # Module-level constants and state
@@ -61,10 +57,10 @@ function handle_on_msg(ws, msg::MessagePb)
     cache_key = get_cache_key_if_not_present(ws, msg, req, get_cache_request_key, get_cache_request_fn)
     cache_key === nothing && return
 
-    send_target_portfolios(ws, req, cache_key, msg)
-#    spawn_task(BACKGROUND_TASKS, "Target Portfolios") do
-#        send_target_portfolios(ws, req, cache_key, msg)
-#    end
+    # send_target_portfolios(ws, req, cache_key, msg)
+    spawn_task(BACKGROUND_TASKS, "Target Portfolios") do
+        send_target_portfolios(ws, req, cache_key, msg)
+    end
 end
 
 # ============================================================================
@@ -76,30 +72,52 @@ function send_target_portfolios(websocket, req::RequestTargetPortfoliosPb, cache
     Process and send target portfolios based on request parameters
     """
     try
+        t_orig_start = time()
         result = get_target_portfolios(req)
-        best_pf_pb = result.best_pf_pb
+        t_orig = time() - t_orig_start
 
-        @info "Sending # portfolios: $(length(best_pf_pb.target_portfolios))"
-        send_response(websocket, msg, pb2bytes(best_pf_pb))
+        # Collection of portfolios to send
+        portfolios = Portfolio[result.pf_target]
 
-        if !best_pf_pb.is_last_transmission
-            s0 = req.market_data_snaps[end].underlying_price
-            calc_date = Date(req.ts, DT_FMT_PB)
-            send_target_portfolios_subs(
-                websocket,
-                best_pf_pb,
-                result.res.pyo_model,
+        t_subs = 0.0
+        if !result.is_last_transmission
+            t_subs_start = time()
+            sub_pfs = run_on_py_thread(() -> compute_target_portfolios_subs(
                 result.pf_target,
                 result.max_obj_val,
-                req,
-                cache_key,
-                msg,
-                s0,
-                result.best_pf_pb.target_portfolios,
-                calc_date,
-                result.er
-            )
+                result.er,
+                result.m_buy, result.m_sell,
+                result.scoped_options_jl
+            ))
+            append!(portfolios, sub_pfs)
+            t_subs = time() - t_subs_start
         end
+
+        t_format_start = time()
+        response_pb = run_on_py_thread(() -> prepare_target_portfolios_response(
+            req,
+            result.er,
+            portfolios,
+            result.s0,
+            result.calc_date,
+            result.m_buy, result.m_sell, result.v_delta,
+            result.scoped_options_jl
+        ))
+        t_format = time() - t_format_start
+
+        @info "Portfolios calculated: Original in $(round(t_orig, digits=3))s, Sub-portfolios in $(round(t_subs, digits=3))s, Formatting in $(round(t_format, digits=3))s. Total: $(round(t_orig + t_subs + t_format, digits=3))s"
+
+        # Update is_last_transmission to true for the final combined response
+        response_pb = ResponseTargetPortfoliosPb(
+            response_pb.ts,
+            response_pb.underlying,
+            response_pb.target_portfolios,
+            true
+        )
+
+        @info "Sending # portfolios: $(length(response_pb.target_portfolios))"
+        send_response(websocket, msg, pb2bytes(response_pb), cache_key)
+        cache_result(cache_key, pb2bytes(response_pb))
 
     catch e
         bt = catch_backtrace()
@@ -112,185 +130,167 @@ function send_target_portfolios(websocket, req::RequestTargetPortfoliosPb, cache
     end
 end
 
-# ============================================================================
-# Send target portfolios sub-portfolios
-## ============================================================================
 
-function send_target_portfolios_subs(
-        websocket,
-        best_pf_pb::ResponseTargetPortfoliosPb,
-        pyo_model,
-        pf_target::Portfolio,
-        max_obj_val::Float64,
-        req::RequestTargetPortfoliosPb,
-        cache_key::String,
-        msg::MessagePb,
-        s0,
-        best_portfolio_lst_pb,
-        calc_date0::Date,
-        er::AbstractEarningsReleaseSimulation
-    )
-        response_target_portfolios_pb = run_on_py_thread(() -> compute_target_portfolios_subs(
-            best_pf_pb,
-            pyo_model,
+function compute_target_portfolios_subs(
+    pf_target::Portfolio,
+    max_obj_val::Float64,
+    er::AbstractEarningsReleaseSimulation,
+    m_buy, m_sell,
+    scoped_options_jl
+)::Vector{Portfolio}
+    try
+        # Get sub-portfolios
+        sub_portfolios = get_sub_portfolios(
             pf_target,
+            er.cfg,
+            scoped_options_jl,
+            m_buy,
+            m_sell,
             max_obj_val,
-            req,
-            s0,
-            best_portfolio_lst_pb,
-            calc_date0,
-            er
-        ))
-        @info "Sending # portfolios: $(length(response_target_portfolios_pb.target_portfolios))"
-        send_response(websocket, msg, pb2bytes(response_target_portfolios_pb), cache_key)
-        cache_result(cache_key, pb2bytes(response_target_portfolios_pb))
+        )
+
+        sub_portfolios = remove_portfolios_contradicting_quantity(
+            sub_portfolios,
+            get_holdings(pf_target)
+        )
+
+        @info "Number of sub-portfolios: $(length(sub_portfolios))"
+        return sub_portfolios
+    catch e
+        @error "Error in compute_target_portfolios_subs" exception=(e, catch_backtrace())
+        return Portfolio[]
     end
+end
 
-    function compute_target_portfolios_subs(
-        best_pf_pb::ResponseTargetPortfoliosPb,
-        pyo_model,
-        pf_target::Portfolio,
-        max_obj_val::Float64,
-        req::RequestTargetPortfoliosPb,
-        s0,
-        best_portfolio_lst_pb,
-        calc_date0::Date,
-        er::AbstractEarningsReleaseSimulation
-    )::ResponseTargetPortfoliosPb
+
+function prepare_target_portfolios_response(
+    req::RequestTargetPortfoliosPb,
+    er::AbstractEarningsReleaseSimulation,
+    portfolios::Vector{Portfolio},
+    s0,
+    calc_date::Date,
+    m_buy, m_sell, v_delta,
+    scoped_options_jl
+)::ResponseTargetPortfoliosPb
+    """
+    Union, deduplicate, format and sort portfolios into ResponseTargetPortfoliosPb.
+    This function is intended to be separate and testable.
+    """
+    unique_pfs = get_unique_portfolios(portfolios)
+    @info "Union of portfolios: $(length(portfolios)) total -> $(length(unique_pfs)) unique"
+
+    pfs_pb = Vector{TargetPortfolioPb}()
+    for pf in unique_pfs
         try
-            # Get sub-portfolios
-            sub_portfolios, sub_instances = get_sub_portfolios(
-                pyo_model,
-                pf_target,
-                er.scoped_options,
-                min_obj_val=0.99 * max_obj_val
-            )
-
-            if length(best_pf_pb.target_portfolios) > 0
-                first_tf = first(best_pf_pb.target_portfolios)
-                holdings = [from_holding_pb(h, calc_date0) for h in values(first_tf.holdings)]
-                sub_portfolios, sub_instances = remove_portfolios_contradicting_quantity(
-                    sub_portfolios,
-                    holdings,
-                    sub_instances
-                )
-            end
-
-            @info "Number of sub-portfolios / instance: $(length(sub_portfolios)) / $(length(sub_instances))"
-
-            mats = er.get_iv_transition_matrices(nothing)
-            m_buy, m_sell, v_delta = py2stress_inputs(mats)
-
-            sub_portfolios_pb = Vector{TargetPortfolioPb}()
-            for (pf, inst) in zip(sub_portfolios, sub_instances)
-                presumed_fill_ivs = er.get_assumed_fill_iv(pf, s0, calc_date0)
-                scoped_options_jl = map(convert_py_sec2jl_sec2, er.scoped_options)
-                stress_test_ds_result = get_stress_test_ds(
-                    req,
-                    scoped_options_jl,
-                    pf_target,
-                    m_buy, m_sell, v_delta,
-                    er.cfg,
-                    Float64(s0)
-                )
-                push!(sub_portfolios_pb, TargetPortfolioPb(
-                    req.underlying,
-                    Dict(string(h.symbol) => holding2holding_pb(h) for h in pf_target),
-                    objective_value(inst),
-                    Dict(string(sec) => v for (sec, v) in presumed_fill_ivs),
-                    scoped_options_jl,
-                    StressTestDsResult2StressTestDsResult_pb(stress_test_ds_result, req, pf)
-                ))
-            end
-
-            # Combine and sort by objective
-            sub_portfolios_pb = vcat(sub_portfolios_pb, best_pf_pb.target_portfolios)
-            sort!(sub_portfolios_pb, by=x -> x.objective, rev=true)
-
-            return ResponseTargetPortfoliosPb(req.ts, req.underlying, sub_portfolios_pb, true)
+            push!(pfs_pb, create_target_portfolio_pb(
+                pf, er, req, s0, calc_date, m_buy, m_sell, v_delta, scoped_options_jl
+            ))
         catch e
-            @error "Error in compute_target_portfolios_subs" exception=(e, catch_backtrace())
-            return ResponseTargetPortfoliosPb(Dates.format(now(Dates.UTC), DT_FMT_PB), req.underlying, best_portfolio_lst_pb, true)
+            @error "Error creating TargetPortfolioPb for portfolio $pf" exception=(e, catch_backtrace())
         end
     end
+
+    # Sort by objective descending
+    sort!(pfs_pb, by=x -> x.objective, rev=true)
+
+    return ResponseTargetPortfoliosPb(req.ts, req.underlying, pfs_pb, true)
+end
+
+
+function create_target_portfolio_pb(
+    pf::Portfolio,
+    er::AbstractEarningsReleaseSimulation,
+    req::RequestTargetPortfoliosPb,
+    s0,
+    calc_date::Date,
+    m_buy, m_sell, v_delta,
+    scoped_options_jl
+)::TargetPortfolioPb
+    """
+    Helper to create a TargetPortfolioPb from a Portfolio and simulation state.
+    """
+    presumed_fill_ivs = get_assumed_fill_iv(er, pf, s0, calc_date)
+    stress_test_ds_result = get_stress_test_ds(
+        scoped_options_jl,
+        pf,
+        m_buy, m_sell, v_delta,
+        er.cfg,
+        Float64(s0)
+    )
+    obj_val = get_total_objective(pf, er.cfg, scoped_options_jl, m_buy, m_sell)
+
+    return TargetPortfolioPb(
+        req.underlying,
+        Dict(string(h.symbol) => holding2holding_pb(h) for h in pf),
+        obj_val,
+        Dict(string(sec) => v for (sec, v) in presumed_fill_ivs),
+        StressTestDsResult2StressTestDsResult_pb(stress_test_ds_result, req, pf)
+    )
+end
+
+
+function get_unique_portfolios(pfs::Vector{Portfolio})::Vector{Portfolio}
+    """
+    Return unique portfolios based on holdings.
+    """
+    unique_pfs = Portfolio[]
+    for p in pfs
+        if !any(up -> up.holdings == p.holdings, unique_pfs)
+            push!(unique_pfs, p)
+        end
+    end
+    return unique_pfs
+end
 
 # ============================================================================
 # Async Sub-Portfolio Processing
 # ============================================================================
 
 function get_sub_portfolios(
-    m,
     pf::Portfolio,
-    scoped_options;
-    min_obj_val::Union{Float64, Nothing}=nothing
-)::Tuple{Vector{Portfolio}, Vector{Py}}
+    cfg::EarningsConfig,
+    scoped_options_jl,
+    m_buy,
+    m_sell,
+    original_objective::Float64
+)::Vector{Portfolio}
     """
-    get_sub_portfolios(m, pf, scoped_options, min_obj_val=nothing)
-    Asynchronously solve sub-problems in parallel using process pools.
+    get_sub_portfolios(pf, cfg, scoped_options_jl, m_buy, m_sell, original_objective) -> Vector{Portfolio}
+    Generate sub-portfolios by slightly adjusting the positions and filter by objective value.
     """
     t0 = time()
-
-    unsolved_instances = py_pf_opt_minlp_pyomo.get_sub_problems_lst(m, pf, m.scoped_options)
-    if isempty(unsolved_instances)
-        @info "get_sub_portfolios(): No unsolved_instances..."
-        return (Portfolio[], Py[])
-    end
-
-    sub_instances = Py[]
-
-    # Use Distributed.jl for parallel processing (Julia's equivalent to ProcessPoolExecutor)
-    n_workers = min(length(unsolved_instances), Sys.CPU_THREADS ÷ 2)
-
-    # Run parallel tasks using pmap
-    results = @sync begin
-        pmap(unsolved_instances) do inst
-            try
-                pp_solve(inst)
-            catch e
-                @error "Error solving sub-problem: $e"
-                nothing
-            end
-        end
-    end
-
-    # Filter and deserialize results
-    for r in results
-        if r !== nothing
-            try
-                inst = deserialize(IOBuffer(r))
-                push!(sub_instances, inst)
-            catch e
-                @error "Error deserializing result: $e"
-            end
-        end
-    end
-
-    @info "get_sub_portfolios: Done MP Time: $(time() - t0)s"
-
     portfolios = Portfolio[]
-    out_instances = Py[]
-    s_holdings = Set{Symbol}()
+    min_obj_val = original_objective * cfg.sub_portfolios_threshold
 
-    for s_inst in sub_instances
-        obj_val = objective_value(s_inst)
-        if min_obj_val !== nothing
-            @info "Sub obj: $(objective_value(s_inst)); % of min_obj_val: $(100 * (objective_value(s_inst) / min_obj_val))%"
+    for h in pf
+        pf_reduced = copy(pf)
+        # reduce the position of each holding by 1. That is -2 to -1 and 3->2
+        q = h.quantity
+        if q == 0 continue end
+        new_q = q - sign(q)
+        if new_q == 0
+            delete!(pf_reduced.holdings, h.symbol)
+        else
+            pf_reduced.holdings[h.symbol] = new_q
         end
-        if min_obj_val !== nothing && obj_val < min_obj_val
-            @info "Skipping. sub obj value too low: $(objective_value(s_inst))"
-            continue
+
+        for opt in scoped_options_jl
+            if opt == h.symbol continue end
+
+            for side in [1.0, -1.0]
+                pf_sub = copy(pf_reduced)
+                add_holding!(pf_sub, opt, side)
+
+                obj_adj = get_total_objective(pf_sub, cfg, scoped_options_jl, m_buy, m_sell)
+                if obj_adj >= min_obj_val
+                    push!(portfolios, pf_sub)
+                end
+            end
         end
-
-        holdings = get_instance_holdings(s_inst, scoped_options)
-        push!(portfolios, holdings)
-        push!(out_instances, s_inst)
-
-        @info "$holdings"
-        s_holdings = union(s_holdings, Set{Symbol}(keys(holdings)))
     end
 
-    @info "# Viable additional options: $(length(s_holdings) - length(pf))"
-    return portfolios, out_instances
+    @info "get_sub_portfolios: Done. Time: $(time() - t0)s, found $(length(portfolios)) sub-portfolios"
+    return portfolios
 end
 
 # ============================================================================
@@ -373,15 +373,13 @@ Remove portfolios that have contradicting quantities with reference portfolio.
 """
 function remove_portfolios_contradicting_quantity(
     portfolios::Vector{Portfolio},
-    ref_holdings,
-    sub_instances
-)::Tuple{Vector{Portfolio}, Vector{Py}}
+    ref_holdings
+)::Vector{Portfolio}
 
     map_direction = Dict(h.symbol => h.quantity for h in ref_holdings)
     portfolio_out = Portfolio[]
-    instances_out = Py[]
 
-    for (i, p) in enumerate(portfolios)
+    for p in portfolios
         # Check if all holdings have same direction as reference
         is_compatible = all(
             get(p.holdings, k, 0) * v >= 0
@@ -390,13 +388,12 @@ function remove_portfolios_contradicting_quantity(
 
         if is_compatible
             push!(portfolio_out, p)
-            push!(instances_out, sub_instances[i])
         else
             @info "Removing portfolio $p as it contradicts with reference portfolio $ref_holdings"
         end
     end
 
-    return portfolio_out, instances_out
+    return portfolio_out
 end
 
 # ============================================================================
@@ -481,13 +478,13 @@ function get_target_portfolios(req::RequestTargetPortfoliosPb)
             s0 = req.market_data_snaps[end].underlying_price
             calc_date = Date(req.ts, DT_FMT_PB)
             release_date = next_release_date(underlying, calc_date)
-#            @info "get_target_portfolios: start" underlying calc_date release_date s0
+            @debug "get_target_portfolios: start" underlying calc_date release_date s0
 
             holdings = Holding[from_holding_pb(h_pb, release_date)
                            for h_pb in values(req.holdings)
                            if h_pb.quantity != 0]
             portfolio = Portfolio(holdings)
-#            @info "get_target_portfolios: portfolio built" n_holdings=length(holdings)
+            @debug "get_target_portfolios: portfolio built" n_holdings=length(holdings)
 
             cfg = EarningsConfig(
                 underlying,
@@ -506,7 +503,7 @@ function get_target_portfolios(req::RequestTargetPortfoliosPb)
             pf_holdings = cfg.portfolio
             pf_position_abs_total = sum(abs(h.quantity) for h in pf_holdings; init=0.0)
 
-            if cfg.n_contracts > pf_position_abs_total
+            if true#:#cfg.n_contracts > pf_position_abs_total
                 @info "get_target_portfolios: solving for target portfolio..."
                 res = run_on_py_thread(() -> get_target_portfolio(req, cfg))
                 @info "get_target_portfolios: solver done, extracting holdings"
@@ -519,15 +516,16 @@ function get_target_portfolios(req::RequestTargetPortfoliosPb)
 
                 er::PyEarningsReleaseSimulation = res.er
                 @info "get_target_portfolios: extracting objective value"
+#                max_obj_val =pyconvert(Float64, py_ers_mod.get_max_obj_value(res))
                 max_obj_val = run_on_py_thread(() -> pyconvert(Float64, py_ers_mod.get_max_obj_value(res)))
                 @info "get_target_portfolios: max_obj_val=$max_obj_val"
                 is_last_transmission = false
             else
                 @info "get_target_portfolios: portfolio already sufficient ($pf_position_abs_total >= $(cfg.n_contracts)), skipping solver"
-                er = run_on_py_thread(() -> PyEarningsReleaseSimulation(cfg, scoped_symbols=collect(req.scoped_symbols)))
+                er = run_on_py_thread(() -> PyEarningsReleaseSimulation(cfg, collect(req.scoped_symbols)))
                 @info "get_target_portfolios: PyEarningsReleaseSimulation created"
 
-                if req.params
+                if !isnothing(req.params) && !isempty(req.params)
                     run_on_py_thread(() -> er.set_ivs0_params(collect(req.params)))
                     @info "get_target_portfolios: ivs0 params set"
                 else
@@ -562,32 +560,24 @@ function get_target_portfolios(req::RequestTargetPortfoliosPb)
                 Float64(s0)
             )
             @info "get_target_portfolios: stress test done"
+            # Test get_total_objective given existing pyomo instance
+#            obj_jl = get_total_objective(pf_target, cfg, scoped_options_jl, m_buy, m_sell)
+#            @info "pyomo max_obj_val=$(max_obj_val); jl max_obj_value=$(obj_jl)"
 
             log_marginal_utility(stress_test_ds)
-            stress_test_ds_pb = StressTestDsResult2StressTestDsResult_pb(stress_test_ds, req, pf_target)
-
-            max_obj_val = max_obj_val > 0 ? max_obj_val : stress_test_ds_pb.total_objective
-            @info "get_target_portfolios: final objective" max_obj_val
-
-            best_portfolio_lst_pb = [
-                TargetPortfolioPb(
-                    req.underlying,
-                    Dict(string(h.symbol) => holding2holding_pb(h) for h in pf_target),
-                    max_obj_val,
-                    presumed_fill_ivs,
-                    stress_test_ds_pb
-                )
-            ]
-
-            best_pf_pb = ResponseTargetPortfoliosPb(
-                req.ts,
-                req.underlying,
-                best_portfolio_lst_pb,
-                is_last_transmission
+            @info "get_target_portfolios: done ✓" underlying is_last_transmission
+            return (
+                pf_target = pf_target,
+                er = er,
+                max_obj_val = max_obj_val,
+                is_last_transmission = is_last_transmission,
+                s0 = s0,
+                calc_date = calc_date,
+                m_buy = m_buy,
+                m_sell = m_sell,
+                v_delta = v_delta,
+                scoped_options_jl = scoped_options_jl
             )
-
-            @info "get_target_portfolios: done ✓" underlying is_last_transmission n_portfolios=length(best_portfolio_lst_pb)
-            return (best_pf_pb=best_pf_pb, er=er, pf_target=pf_target, res=res, max_obj_val=max_obj_val)
         catch e
             rethrow(e)
         end

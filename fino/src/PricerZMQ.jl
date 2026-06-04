@@ -410,8 +410,20 @@ reply_error(socket, msg::String) = reply_error(socket, msg, [])
 # Server loop
 # ─────────────────────────────────────────────────────────────────────────────
 
-function start_pricer(endpoint::String = "tcp://127.0.0.1:5555")
-    @info "PricerZMQ.start_pricer(): $endpoint"
+function start_pricer(
+    protocol = get(ENV, "PricerProtocol", "tcp"),
+    host = get(ENV, "PricerHost", "0.0.0.0"),
+    port::Int = parse(Int, get(ENV, "PricerPort", "8102"))
+)
+    if protocol == "ipc"
+        start_pricer_at("ipc://$host.$port")
+    end
+    start_pricer_at("tcp://$(host):$port")
+end
+
+
+function start_pricer_at(endpoint::String)
+    @info "PricerZMQ.start_pricer_at(): $endpoint"
 
     # ─────────────────────────────────────────────────────────────────────────────
      # JIT Compilation Warm-up
@@ -474,7 +486,14 @@ function start_pricer(endpoint::String = "tcp://127.0.0.1:5555")
                 local result   = dispatch(resolved)
                 cmd_name = get(CMD_NAMES, req.cmd, "UNKNOWN(0x$(string(req.cmd, base=16)))")
                 cmd_counts[req.cmd] = get(cmd_counts, req.cmd, 0) + 1
-                @info "[$(cmd_counts[req.cmd])] cmd=$cmd_name = $result"
+                if isnan(result)
+                    @warn "[$(cmd_counts[req.cmd])] cmd=$cmd_name returned NaN" req resolved
+                else
+                     @debug "[$(cmd_counts[req.cmd])] cmd=$cmd_name = $result"
+                end
+                if cmd_counts[req.cmd] % 1000 == 0
+                    @info "[$(cmd_counts[req.cmd])] cmd=$cmd_name = $result"
+                end
                 reply_f32(socket, result)
             catch ex
                 reply_error(socket, sprint(showerror, ex), catch_backtrace())

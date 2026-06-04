@@ -1,7 +1,10 @@
 import os
+from datetime import date
 
 from typing import List
 from multiprocessing import Pool
+
+import pandas as pd
 
 from options.calibrate_yield_curve import calibrate_yield_curve_and_store
 from options.helper import get_pkl_cache_key
@@ -16,6 +19,7 @@ from options.types.enums import Resolution
 from options.types.equity import Equity
 from shared.paths import Paths
 
+clear_prefix = 'v_ivs'
 
 def list_valid_training_sym_dates(tickers=None):
     """
@@ -59,10 +63,9 @@ def list_valid_training_sym_dates(tickers=None):
     info(f'No Data: {len(missing)}')
 
 
-def cache_all_surfaces(tickers: List[str]=None, arb_free=False):
+def cache_all_surfaces(tickers: List[str]=None, arb_free=False, overwrite=False):
     tickers_in = ','.join(tickers or os.listdir(Paths.path_data.joinpath('option', 'usa', 'second'))).upper()
 
-    clear_prefix = 'v_ivs'
     root = Paths.path_analysis_frames
     scope = ScopePrePost.mini_train
     sym_dates = available_sym_dates(tickers_in, scope)
@@ -77,10 +80,17 @@ def cache_all_surfaces(tickers: List[str]=None, arb_free=False):
         resolution = Resolution.second
         seq_ret_threshold = 0.002
 
-        info(f'Processing {sym} on {release_date}...')
+        info(f'Processing {sym} for release date: {release_date} ...')
         for dt in scoped_dates(release_date, scope):
+            if dt > date.today() or dt.year < 2025:
+                continue
             fn = get_pkl_cache_key(clear_prefix, equity, [dt], resolution, seq_ret_threshold, QuoteSide.mid, arb_free, seq_ret_threshold_surface)
-            if os.path.exists(os.path.join(root, fn)):
+            fp = os.path.join(root, fn)
+            if overwrite and os.path.exists(fp):
+                os.remove(fp)
+                info(f'Deleted {fp}')
+
+            if os.path.exists(fp):
                 already_exist += 1
             else:
                 payloads += [(equity, [dt], resolution, seq_ret_threshold, arb_free, seq_ret_threshold_surface)]
@@ -90,7 +100,7 @@ def cache_all_surfaces(tickers: List[str]=None, arb_free=False):
 
 
 def execute(payloads, already_exist):
-    n_processes = 4
+    n_processes = 6
     info(f'get_ivs_mp: Processing {len(payloads)} payloads in {n_processes}. # already_exist: {already_exist}')
     with Pool(n_processes) as pool:
         pool.map(exec_payload, payloads)
@@ -123,23 +133,12 @@ if __name__ == "__main__":
     - historical stock vol changes. so actual vol vs implied vol ( can be accomplished with daily data )
     """
     # Test calibration on the last tenor. Both IV and price are massively off mid price/iv
-    # equity = Equity('DAL')
-    equities = [
-        # Equity('NKE').symbol.upper(),
-        # Equity('DAL').symbol.upper(),
-        # Equity('FDX').symbol.upper(),
-        # Equity('TGT').symbol.upper(),  # data missing
-        # Equity('DELL').symbol.upper(),
-        # Equity('PEP').symbol.upper(),
-        # Equity('PATH').symbol.upper(),
-        # Equity('ORCL').symbol.upper(),
-        Equity('CSCO').symbol.upper(),
-    ]
-    # equities = [Equity('FDX').symbol.upper(), Equity('DAL').symbol.upper()]
+    equities = ["CRWD"]
 
     # # list_valid_training_sym_dates(['NKE'])
+    # clear_cache('HPE')
     for eq in equities:
-        cache_all_surfaces([eq])
+        cache_all_surfaces([eq], overwrite=False)
     # cache_all_surfaces([])
-    # list_valid_training_sym_dates(['NKE'])
+    # list_valid_training_sym_dates(['ESLT'])
     print('Done.')

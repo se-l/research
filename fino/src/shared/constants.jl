@@ -1,8 +1,9 @@
 using Dates
-using JSON  # For standard JSON; if JSON5 needed, use JSON3.jl instead
-using Memoization  # ] add Memoization; replaces functools.lru_cache
+using JSON
+using Memoization
+using TimeZones
 
-const FILE_ROOT = Paths.PATH_DATA  # Assuming Paths is defined elsewhere; adjust as needed
+const FILE_ROOT = Paths.PATH_DATA
 
 # ── Lazy-loaded globals (no I/O on include) ────────────────────────────────────
 let
@@ -63,6 +64,56 @@ function next_release_date(sym::String, dt::Date)::Union{Date, Nothing}
     release_dates = EarningsPreSessionDates(sym)
     return something(findfirst(d -> d >= dt, release_dates) |> i -> i === nothing ? nothing : release_dates[i], nothing)
 end
+
+function _et_business_date()::Date
+    et_now = now(TimeZone("America/New_York"))
+    if hour(et_now) < 9 || (hour(et_now) == 9 && minute(et_now) < 30)
+        return Date(et_now) - Day(1)
+    end
+    return Date(et_now)
+end
+
+"""
+    get_configs(v_ticker::Vector{String}; n_days_lookback=-1, n_days_lookahead=2, min_release_date=nothing, takes=nothing) -> Vector{RawDataConfig}
+
+Sorted by release date. Easy to continue where left off.
+"""
+function get_configs(v_ticker::Vector{String}; n_days_lookback::Int=-1, n_days_lookahead::Int=2, min_release_date::Union{Date, Nothing}=nothing, takes::Union{AbstractRange, Vector{Int}, Nothing}=nothing)::Vector{RawDataConfig}
+    ea_configs = []
+    iterations = takes === nothing ? (-30:-1) : takes
+    
+    for take in iterations
+        for ticker in v_ticker
+            dates = EarningsPreSessionDates(ticker)
+            # Python's try-except IndexError
+            if take < 0
+                idx = length(dates) + take + 1
+            else
+                idx = take + 1
+            end
+            
+            if idx < 1 || idx > length(dates)
+                continue
+            end
+            
+            ea_date = dates[idx]
+            
+            if min_release_date !== nothing && min_release_date > ea_date
+                continue
+            end
+            
+            start_dt = add_trade_days(ea_date, n_days_lookback)
+            stop_dt = add_trade_days(ea_date, n_days_lookahead)
+            stop_dt = min(stop_dt, _et_business_date())
+            push!(ea_configs, (ea_date, RawDataConfig(start_dt, stop_dt, ticker)))
+        end
+    end
+    # Sort by ea_date and return the RawDataConfig objects
+    sort!(ea_configs, by = x -> x[1])
+    return [c[2] for c in ea_configs]
+end
+
+export EarningsPreSessionDates, next_release_date, get_configs
 
 model_nm_earnings_iv_drop_regressor = get(ENV, "model_nm_earnings_iv_drop_regressor", "f_20260404-144024")
 TZ_USEASTERN = "US/Eastern"

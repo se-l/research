@@ -1,5 +1,7 @@
 import math
 import os.path
+import pickle
+
 import pandas as pd
 import numpy as np
 
@@ -15,18 +17,17 @@ from options.types.option import get_vega_cuda, get_delta_cuda
 from options.types.sym_date import SymDate
 from shared.modules.logger import info, error
 from shared.paths import Paths
-from shared.constants import DiscountRateMarket, EarningsPreSessionDates, USA, SECOND
-from options.helper import find_loc_every_x_pc, year_quarter, earnings_download_dates_start_end, spot_from_df_equity_into_options, df2atm_iv, \
+from shared.constants import EarningsPreSessionDates, USA, SECOND
+from options.helper import find_loc_every_x_pc, spot_from_df_equity_into_options, df2atm_iv, \
     enrich_atm_iv_by_right, \
-    ps2intrinsic_value, quotes2multi_index_df, load_option_trades, join_spot, join_quotes, ps2mid_iv_if_nonzero, get_dividend_yield, \
-    get_moneyness_fwd, cache_to_disk, get_v_tenor_from_index, df2iv
+    ps2intrinsic_value, quotes2multi_index_df, load_option_trades, join_spot, join_quotes, ps2mid_iv_if_nonzero, \
+    get_moneyness_fwd, cache_to_disk, get_v_tenor_from_index, df2iv, get_pkl_cache_key
 from options.types.enums import SecurityType, TickType, Resolution, OptionRight
 from options.types.equity import Equity
 from options.client import Client
 from options.types.option_contract import OptionContract
 from options.types.option_frame import OptionFrame
 import options.client as mClient
-from shared.utils.decorators import time_it
 
 reload(mClient)
 client = mClient.Client()
@@ -42,20 +43,6 @@ def unpack_mi_df_index(ps: pd.Series) -> tuple:
 
 def ps2mid_iv(ps: pd.Series) -> pd.Series:
     return (ps['ask_iv'] + ps['bid_iv']) / 2
-
-
-class ATMHelper:
-    def __init__(self, expiry: date, strike: float, calculation_date: date, net_yield: float):
-        self.expiry = expiry
-        self.strike = strike
-        self.calculation_date = calculation_date
-        self.net_yield = net_yield
-
-    def PV_K(self):
-        # PV(K) = K * exp(-(r - q) * (T - t))
-        # net_yield = rate - dividend_yield = r - q
-        # T-t = DTE/365
-        return self.strike * np.exp(-self.net_yield * (self.expiry - self.calculation_date).days / 365)
 
 
 def generate_option_frame(start, end, equity, resolution, seq_ret_threshold, version='1', keep_seconds: List[datetime] = None):
@@ -140,7 +127,9 @@ def enrich_quotes(underlying: Equity, option_frame):
     assert len(set(v_calc_date)) == 1, 'The current dividends function only allows a single calculation date'
     dividends = get_dividends(underlying.symbol.upper(), start=v_calc_date[0])
 
+    print('frame builder.enrich_quotes(): bid iv...')
     df['bid_iv'] = df2iv(df, price_col_nm='bid_close', dividends=dividends, calculation_date=df['date'].values)
+    print('frame builder.enrich_quotes(): ask iv...')
     df['ask_iv'] = df2iv(df, price_col_nm='ask_close', dividends=dividends, calculation_date=df['date'].values)
     df['mid_iv'] = df.apply(ps2mid_iv_if_nonzero, axis=1)
     df['extrinsic_bid'] = df['bid_close'] - df['intrinsic_value']
@@ -151,6 +140,7 @@ def enrich_quotes(underlying: Equity, option_frame):
     # (abs(df['vega_mid_iv'] / 100 - v_vega) < 0.0001).sum() == len(df)
 
     df['mid_price'] = (df['bid_close'] + df['ask_close']) / 2
+    print('frame builder.enrich_quotes(): mid_price_iv...')
     df['mid_price_iv'] = df2iv(df, price_col_nm='mid_price', dividends=dividends, calculation_date=df['date'].values, equity=underlying)
 
     df['bid_delta'] = None
@@ -158,10 +148,15 @@ def enrich_quotes(underlying: Equity, option_frame):
     df['delta'] = None
 
     v_is_call = df.index.get_level_values('right').map({OptionRight.call: 1, OptionRight.put: 0}).values
+    print('frame builder.enrich_quotes(): delta...')
     df['delta'] = get_delta_cuda(s=df['spot'].values, k=df['strike_flt'].values, t=df['tenor'].values, v_is_call=v_is_call, iv=df['mid_iv'].values, dividends=dividends, calculation_date=df['date'].values)
+    print('frame builder.enrich_quotes(): bid_delta...')
     df['bid_delta'] = get_delta_cuda(s=df['spot'].values, k=df['strike_flt'].values, t=df['tenor'].values, v_is_call=v_is_call, iv=df['bid_iv'].values, dividends=dividends, calculation_date=df['date'].values)
+    print('frame builder.enrich_quotes(): ask_delta...')
     df['ask_delta'] = get_delta_cuda(s=df['spot'].values, k=df['strike_flt'].values, t=df['tenor'].values, v_is_call=v_is_call, iv=df['ask_iv'].values, dividends=dividends, calculation_date=df['date'].values)
+    print('frame builder.enrich_quotes(): vega_mid_iv...')
     df['vega_mid_iv'] = 100 * get_vega_cuda(s=df['spot'].values, k=df['strike_flt'].values, t=df['tenor'].values, v_is_call=v_is_call, iv=df['mid_iv'].values, dividends=dividends, calculation_date=df['date'].values)
+    print('frame builder.enrich_quotes(): vega_mid_iv. done.')
 
     ts_delta = df.index.get_level_values('expiry').to_series().apply(
         lambda ex: datetime(ex.year, ex.month, ex.day)).values - df.index.get_level_values('ts').to_series().values
@@ -226,6 +221,7 @@ def enrich_trades(underlying: Equity, option_frame):
     dividends = get_dividends(underlying.symbol.upper(), start=v_calc_date[0])
 
     df['intrinsic_value'] = df.apply(partial(ps2intrinsic_value, spot_column='spot'), axis=1)
+    print('frame builder.enrich_trades(): fill_iv...')
     df['fill_iv'] = df2iv(df, price_col_nm='close', dividends=dividends, calculation_date=df['date'].values)
     df['extrinsic_value'] = df['close'] - df['intrinsic_value']
 
@@ -234,8 +230,11 @@ def enrich_trades(underlying: Equity, option_frame):
 
     df['fill_delta'] = None
     v_is_call = df.index.get_level_values('right').map({OptionRight.call: 1, OptionRight.put: 0}).values
+    print('frame builder.enrich_trades(): delta...')
     df['delta'] = get_delta_cuda(s=df['spot'].values, k=df['strike_flt'].values, t=df['tenor'].values, v_is_call=v_is_call, iv=df['fill_iv'].values, dividends=dividends, calculation_date=df['date'].values)
+    print('frame builder.enrich_trades(): vega_fill_iv...')
     df['vega_fill_iv'] = 100 * get_vega_cuda(s=df['spot'].values, k=df['strike_flt'].values, t=df['tenor'].values, v_is_call=v_is_call, iv=df['fill_iv'].values, dividends=dividends, calculation_date=df['date'].values, equity=underlying)
+    print('frame builder.enrich_trades(): vega_fill_iv. Done')
 
     ts_delta = df.index.get_level_values('expiry').to_series().apply(
         lambda ex: datetime(ex.year, ex.month, ex.day)).values - df.index.get_level_values('ts').to_series().values
@@ -261,23 +260,20 @@ def enrich_trades(underlying: Equity, option_frame):
 
     return option_frame
 
+def downsample_df_options(df, n: int = 3_000) -> 'pd.DataFrame':
+    """
+    Multi-index of ['ts', 'expiry', 'strike', 'right'].
+    Limits each expiry group to at most `n` rows via random sampling.
+    """
+    info(f'downsample_df_options(): downsampling to {n} rows per tenor...')
+    def _sample(group):
+        if len(group) <= n:
+            return group
+        return group.sample(n=n, random_state=None)
 
-def stressed_iv_col_nm(ds_ret) -> str: return f'iv_ds_ret_{ds_ret:.2f}'
-def stressed_npv_col_nm(ds_ret) -> str: return f'npv_ds_ret_{ds_ret:.2f}'
+    return df.groupby('expiry', group_keys=False).apply(_sample)
 
-
-@time_it
-def enrich_skew_measures(option_frame, equity: Equity):
-    df = option_frame.df_options
-    iv_surface = IVSurface(equity, df)
-
-    iv_surface.enrich_iv_curvature(iv_col='mid_iv')
-    iv_surface.df = enrich_regressed_skew_rolling(iv_surface.df)
-    v_ds_ret = np.linspace(0.8, 1.2, 21)
-    iv_surface.mp_enrich_mean_regressed_skew_ds(v_ds_ret)
-
-
-def fetch_option_frames_by_separate_dt_spans(dates: List[date], underlying: Equity, resolution: Resolution, seq_ret_threshold: float):
+def fetch_option_frames_by_separate_dt_spans(dates: List[date], underlying: Equity, resolution: Resolution, seq_ret_threshold: float, n_samples_per_tenor = 3_000):
     frames = []
     dt_span = []
     for dt in dates:
@@ -294,6 +290,7 @@ def fetch_option_frames_by_separate_dt_spans(dates: List[date], underlying: Equi
         dt_span = [dt]
     info(f'Fetching: {dt_span}')
     option_frame = generate_option_frame(dt_span[0], dt_span[-1], underlying, resolution, seq_ret_threshold)
+    option_frame.df_options = downsample_df_options(option_frame.df_options, n_samples_per_tenor)
     frames.append(option_frame)
 
     df_quotes = pd.concat([frame.df_options for frame in frames]).sort_index()
@@ -315,10 +312,16 @@ def fetch_option_frames_by_separate_dt_spans(dates: List[date], underlying: Equi
 
 
 def get_option_frame(underlying: Equity, dates: List[date], columns_quote: List[str] = (), columns_trade: List[str] = (), resolution: Resolution = Resolution.second,
-                     seq_ret_threshold: float = 0.002) -> OptionFrame:
+                     seq_ret_threshold: float = 0.002, n_samples_per_tenor=3_000) -> OptionFrame:
     frames = []
     for dt in dates:
-        frames.append(get_option_frame_by_date(underlying, [dt], columns_quote, columns_trade, resolution, seq_ret_threshold))
+        fn = get_pkl_cache_key('option_frame', underlying, [dt], columns_quote, columns_trade, resolution, seq_ret_threshold, n_samples_per_tenor)
+        fp = os.path.join(Paths.path_analysis_frames, fn)
+        # if os.path.exists(fp):
+        #     os.remove(fp)
+        #     print(f'Deleted {fp}')
+
+        frames.append(get_option_frame_by_date(underlying, [dt], columns_quote, columns_trade, resolution, seq_ret_threshold, n_samples_per_tenor))
     df_quotes = pd.concat([frame.df_options for frame in frames]).sort_index()
     df_option_trades = pd.concat([frame.df_option_trades for frame in frames]).sort_index()
     df_equity = pd.concat([frame.df_equity for frame in frames]).sort_index()
@@ -338,8 +341,9 @@ def get_option_frame(underlying: Equity, dates: List[date], columns_quote: List[
 
 @cache_to_disk('option_frame', Paths.path_analysis_frames)
 def get_option_frame_by_date(underlying: Equity, dates: List[date], columns_quote: List[str] = (), columns_trade: List[str] = (), resolution: Resolution = Resolution.second,
-                     seq_ret_threshold: float = 0.01) -> OptionFrame:
-    option_frame = fetch_option_frames_by_separate_dt_spans(dates, underlying, resolution, seq_ret_threshold)
+                             seq_ret_threshold: float = 0.01,
+                             n_samples_per_tenor=3_000) -> OptionFrame:
+    option_frame = fetch_option_frames_by_separate_dt_spans(dates, underlying, resolution, seq_ret_threshold, n_samples_per_tenor)
 
     option_frame = enrich_quotes(underlying, option_frame)
     option_frame = enrich_trades(underlying, option_frame)
@@ -354,6 +358,8 @@ def check_data_presence(sym_date: SymDate, scope: ScopePrePost|str) -> bool:
     release_date = sym_date.date
 
     for dt in scoped_dates(release_date, scope):
+        if dt >= date.today():
+            continue
         for sec_type in (SecurityType.option, SecurityType.equity):
             res = client.date_present(Equity(ticker), dt, sec_type)
             all_present = all_present and res
@@ -372,61 +378,3 @@ def available_sym_dates(tickers: str = None, scope: str|ScopePrePost = ScopePreP
             if check_data_presence(SymDate(sym, release_date), scope) or release_date >= date.today():
                 sym_dates.append(SymDate(sym, release_date))
     return sym_dates
-
-
-def run():
-    tickers = ','.join(os.listdir(os.path.join(Paths.path_data, r'option\usa\second'))).upper()
-    tickers = 'ORCL'
-
-    for take in [-2]:
-        for sym in tickers.split(','):
-            try:
-                release_date = EarningsPreSessionDates(sym)[take]
-                print(release_date)
-            except IndexError:
-                print(f'{sym} has no earnings date for take={take}.')
-                continue
-
-            start, end = earnings_download_dates_start_end(release_date)
-            if not check_data_presence(SymDate(sym, release_date)):
-                print(f'{sym} data not present.')
-                continue
-            # if release_date >= date.today():
-            #     print(f'{sym} earnings date is in the future.')
-            #     continue
-            # easy override for earnings announcement dates
-
-            equity = Equity(sym)
-            resolution = Resolution.minute
-            seq_ret_threshold = 0.002
-            # resolution = Resolution.second
-            # seq_ret_threshold = 0.001
-            v = year_quarter(end)
-
-            rate = DiscountRateMarket
-            dividend_yield = get_dividend_yield(sym)
-
-            # if OptionFrame.fn(sym.upper(), resolution, seq_ret_threshold, year_quarter(end)) in os.listdir(Paths.path_analysis_frames):
-            #     print(f'{sym} already processed.')
-            #     continue
-
-            # option_frame = OptionFrame.load_frame(equity, resolution, seq_ret_threshold, v)
-            option_frame = generate_option_frame(start, end, equity, resolution, seq_ret_threshold, version=v)
-            option_frame = enrich_quotes(equity, option_frame)
-            # option_frame = enrich_atm_iv(option_frame, net_yield)
-            option_frame = enrich_trades(equity, option_frame)
-
-            # kalman_states = fit_kalman_states(option_frame.df_option_trades, release_date, net_yield)
-            # enrich_kalman(option_frame.df_option_trades, kalman_states, net_yield=net_yield)
-            # enrich_skew_measures(option_frame, equity)
-            # option_frame.store()
-
-            print(f'Done. {sym.upper()} {seq_ret_threshold} {v}')
-
-
-if __name__ == '__main__':
-    # run()
-    """
-    Worked for a while. Increasingly in need to disparate dates, immediate availability without storing this, wanting to just get the needed columns.
-    So a function where one passes: ticker, dates, column names.
-    """

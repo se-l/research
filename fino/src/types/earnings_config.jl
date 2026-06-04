@@ -23,6 +23,9 @@ mutable struct EarningsConfig
     n_contracts::Int
     earnings_iv_drop_regressor_model_name_version::String
     var_neg_ratio::Float64
+    weight_max_t_curve::Float64
+    weight_wing_lift::Float64
+    sub_portfolios_threshold::Float64
 
     function EarningsConfig(
         sym::String,
@@ -34,7 +37,7 @@ mutable struct EarningsConfig
         seq_ret_threshold = 0.002,
         min_tenor = 0.0,
         max_tenor = 999.0,
-        moneyness_limits::NTuple{2, Float64} = (0.8, 1.2),
+        moneyness_limits::NTuple{2, Float64} = (0.75, 1.25),
         abs_delta_limits::NTuple{2, Float64} = (0.05, 0.95),
         add_equity_holdings::Bool = true,
         v_dIVT1::Vector{Float64} = collect(0.0:-0.04/1:-0.04),  # linspace(0.0, -0.04, 2)
@@ -47,6 +50,9 @@ mutable struct EarningsConfig
         n_contracts = 20,
         earnings_iv_drop_regressor_model_name_version::String = "f_20260407-205754",
         var_neg_ratio = 1.5,
+        weight_max_t_curve = 5.0,
+        weight_wing_lift = 0.2,
+        sub_portfolios_threshold=0.98,
     )
         new(
             sym, release_date, plot, plot_last, max_scoped_options,
@@ -55,7 +61,7 @@ mutable struct EarningsConfig
             v_dIVT1, earnings_iv_drop_regressor, ts_time_power,
             v_ds_ret, portfolio, run_solver, solver_t_params,
             n_contracts, earnings_iv_drop_regressor_model_name_version,
-            var_neg_ratio,
+            var_neg_ratio, weight_max_t_curve, weight_wing_lift, sub_portfolios_threshold
         )
     end
 end

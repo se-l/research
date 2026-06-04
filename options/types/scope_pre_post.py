@@ -12,6 +12,7 @@ class ScopePrePost:
     mini_train_pipe: str = 'mini_train_pipe'
     mini_train_pipe_ho: str = 'mini_train_pipe_ho'
     pm_1: str = 'pm_1'
+    live_trading: str = 'live_trading'
 
 
 def scoped_dates(release_date: date, scope: ScopePrePost | str = ScopePrePost.all):
@@ -25,6 +26,8 @@ def scoped_dates(release_date: date, scope: ScopePrePost | str = ScopePrePost.al
         dates = [add_trade_days(release_date, i) for i in [1]]
     elif scope == ScopePrePost.mini_train:
         dates = [add_trade_days(release_date, i) for i in [-1, 0, 1]]
+    elif scope == ScopePrePost.live_trading:
+        dates = [add_trade_days(release_date, i) for i in [-1]]
     elif scope == ScopePrePost.mini_train_pipe:
         dates = [add_trade_days(release_date, i) for i in [-1, 0]]
     elif scope == ScopePrePost.mini_train_pipe_ho:

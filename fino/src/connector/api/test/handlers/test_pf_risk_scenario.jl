@@ -1,8 +1,6 @@
 # test_ssvi_calibration.jl
 
-using Pkg
-Pkg.activate("C:\\repos\\research\\fino")
-#include("src\\Fino.jl")
+include(joinpath(@__DIR__, "src\\init.jl"))
 
 using Serialization
 using Fino: Paths, Security, Holding, SecurityType, security_type_equity, security_type_option, option_right_call, option_right_put, OptionRight, Option,
@@ -12,7 +10,7 @@ using Fino.WS: parse_pb, RequestPfRiskScenariosPb, PfRiskScenarioHandler, Messag
 # ============================================================
 # Load cached req
 # ============================================================
-fn = raw"RequestPfRiskScenarios-CSCO-2026-02-11T110437-3adba250207d4a967efbfa3a6061ac159a6b93a3d235021db721f58073268832.bin"
+fn = raw"RequestPfRiskScenarios-HPE-2026-06-01T123001-0d391a0b59ecde3c9ac97d364d239fa4d5a7ddc4d0bb972445d3a2299f5a20f9.bin"
 fp = joinpath(Paths.PATH_API_CACHE, fn)
 
 @info "Loading cached req from: $fp"
@@ -38,7 +36,7 @@ cache_req_key = PfRiskScenarioHandler.get_cache_request_key(req)
 
 ensure_py_initialized_fino()
 ensure_py_initialized()
-#start_py_worker()
+start_py_worker()
 
 # ============================================================
 # Run directly — no WS needed

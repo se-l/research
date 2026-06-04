@@ -13,7 +13,7 @@ using Logging
 using Serialization
 using Distributed
 using ..WS
-using ...Fino: EarningsConfig, Holding, Portfolio, next_release_date, PyEarningsReleaseSimulation, from_holding_pb, pf_to_py_pf
+using ...Fino
 
 # ============================================================================
 # Module-level constants and state
@@ -96,11 +96,13 @@ function get_pf_risk_scenarios(
     req::RequestPfRiskScenariosPb,
     cfg::EarningsConfig
 )
+    @info "[$(now())] get_pf_risk_scenarios: starting"
     calc_date = Date(req.ts, DT_FMT_PB)
     holdings = Holding[from_holding_pb(h, calc_date) for h in values(req.holdings)]
     pf = Portfolio(holdings)
     
     # Create earnings release simulation
+    @info "[$(now())] get_pf_risk_scenarios: creating PyEarningsReleaseSimulation"
     er = PyEarningsReleaseSimulation(cfg, collect(req.scoped_symbols))
     
     if isempty(er.scoped_options)
@@ -115,12 +117,15 @@ function get_pf_risk_scenarios(
     end
     
     # Get portfolio impact by option
-    py_release_date = pydate(year(cfg.release_date), month(cfg.release_date), day(cfg.release_date))
-    return py_pf_impact_by_option.get_pf_impact_by_option(
+    py_release_date = Fino.pydate(year(cfg.release_date), month(cfg.release_date), day(cfg.release_date))
+    @info "[$(now())] get_pf_risk_scenarios: calling get_pf_impact_by_option"
+    res = py_pf_impact_by_option.get_pf_impact_by_option(
         cfg.sym,
         pf=pf_to_py_pf(pf, cfg.release_date),
         release_date=py_release_date
     ).pf_impacts
+    @info "[$(now())] get_pf_risk_scenarios: finished"
+    return res
 end
 
 # ============================================================================
@@ -183,6 +188,7 @@ end
 # ============================================================================
 
 function compute_pf_risk_scenario(req::RequestPfRiskScenariosPb)::Vector{PfRiskScenarioPb}
+    @info "[$(now())] compute_pf_risk_scenario: starting underlying=$(req.underlying)"
     underlying = req.underlying
     calc_date = Date(req.ts, DT_FMT_PB)
     release_date = next_release_date(underlying, calc_date)
@@ -198,8 +204,12 @@ function compute_pf_risk_scenario(req::RequestPfRiskScenariosPb)::Vector{PfRiskS
 
     pf_impacts = get_pf_risk_scenarios(req, cfg)
 
+    @info "[$(now())] compute_pf_risk_scenario: converting $(length(pf_impacts)) pf_impacts"
     pf_risk_scenarios = PfRiskScenarioPb[]
-    for p in pf_impacts
+    for (i, p) in enumerate(pf_impacts)
+        if i % 100 == 0
+            @info "[$(now())] compute_pf_risk_scenario: converting impact $i/$(length(pf_impacts))"
+        end
         holdings_impact = py2jl_holdings(p.holdings)
 
         push!(pf_risk_scenarios, PfRiskScenarioPb(
@@ -213,6 +223,7 @@ function compute_pf_risk_scenario(req::RequestPfRiskScenariosPb)::Vector{PfRiskS
         ))
     end
 
+    @info "[$(now())] compute_pf_risk_scenario: finished"
     return pf_risk_scenarios
 end
 
@@ -222,26 +233,33 @@ function send_pf_risk_scenarios(websocket, req::RequestPfRiskScenariosPb, cache_
     Process and send portfolio risk scenarios via WebSocket.
     """
     try
-        pf_risk_scenarios = try
-            run_on_py_thread(() -> compute_pf_risk_scenario(req))
-        catch e
-            rethrow(e)
-        end
+        @info "[$(now())] send_pf_risk_scenarios: starting computation"
+        pf_risk_scenarios = run_on_py_thread(() -> compute_pf_risk_scenario(req))
 
-        @info "Sending pf risk scenarios"
+        @info "[$(now())] send_pf_risk_scenarios: Sending pf risk scenarios (count: $(length(pf_risk_scenarios)))"
         payload = pb2bytes(ResponsePfRiskScenariosPb(
             Dates.format(now(Dates.UTC), DT_FMT_PB),
             req.underlying,
-            pf_risk_scenarios)
-        )
+            pf_risk_scenarios
+        ))
+        if websocket.writeclosed
+            @warn "send_pf_risk_scenarios: WebSocket already closed, dropping response"
+            return
+        end
         send_response(websocket, msg, payload, cache_request_key)
         cache_result(cache_request_key, payload)
+        @info "[$(now())] send_pf_risk_scenarios: finished"
 
     catch e
-        reason = "Error: pf_risk_scenarios async: $e"
-        @error reason
-        empty_response = ResponsePfRiskScenarios()
-        send_empty_response(websocket, msg, pb2bytes(empty_response), reason=reason)
+        bt = catch_backtrace()
+        if e isa PythonCall.PyException
+            @error "send_pf_risk_scenarios: PythonException" exception=(e, bt) py_msg=sprint(showerror, e)
+        else
+            @error "send_pf_risk_scenarios: exception" exception=(e, bt)
+        end
+
+        empty_response = ResponsePfRiskScenariosPb(Dates.format(now(Dates.UTC), DT_FMT_PB), req.underlying, PfRiskScenarioPb[])
+        send_empty_response(websocket, msg, pb2bytes(empty_response))
     end
 end
 

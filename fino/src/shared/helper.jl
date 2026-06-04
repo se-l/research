@@ -64,6 +64,26 @@ function trade_days_between_dates(dt1::Date, dt2::Date; market::String="Equity-u
     return [dt for dt in d_start:Day(1):d_end if dayofweek(dt) <= 5 && dt ∉ holidays]
 end
 
+"""
+    add_trade_days(dt::Date, n::Int; market::String="Equity-usa-[*]") -> Date
+
+Add n trading days to date dt.
+"""
+function add_trade_days(dt::Date, n::Int; market::String="Equity-usa-[*]")::Date
+    holidays = Set(get_market_hours_holidays(market))
+    current_dt = dt
+    remaining = abs(n)
+    step = n >= 0 ? Day(1) : Day(-1)
+    
+    while remaining > 0
+        current_dt += step
+        if dayofweek(current_dt) <= 5 && current_dt ∉ holidays
+            remaining -= 1
+        end
+    end
+    return current_dt
+end
+
 # ============================================================================
 # Memoization cache for get_tenor
 # ============================================================================
@@ -216,4 +236,5 @@ end
 export get_tenor,
        date_to_sod,
        date_to_datetime,
+       add_trade_days,
        clear_tenor_cache

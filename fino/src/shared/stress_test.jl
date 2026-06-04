@@ -87,40 +87,54 @@ end
 """
     get_v_target_dnlv(pf, cfg, scoped_options, m_dnlv01_buy, m_dnlv01_sell) -> Vector{Float64}
 """
+#function get_v_target_dnlv(pf::Portfolio, cfg::EarningsConfig, scoped_options, m_dnlv01_buy, m_dnlv01_sell)::Vector{Float64}
+#    v_q = holdings2v_q(pf, scoped_options)
+#    nlv_by_ds = get_nlv_by_ds(v_q, m_dnlv01_buy, m_dnlv01_sell)
+#    dct_nlv_by_ds = Dict(zip(cfg.v_ds_ret, nlv_by_ds))
+#    y = get_t_curve(cfg, cfg.v_ds_ret)
+#    y_scaled = y ./ maximum(y)
+#    return y_scaled .* dct_nlv_by_ds[1.0]
+#end
+
 function get_v_target_dnlv(pf::Portfolio, cfg::EarningsConfig, scoped_options, m_dnlv01_buy, m_dnlv01_sell)::Vector{Float64}
     v_q = holdings2v_q(pf, scoped_options)
     nlv_by_ds = get_nlv_by_ds(v_q, m_dnlv01_buy, m_dnlv01_sell)
     dct_nlv_by_ds = Dict(zip(cfg.v_ds_ret, nlv_by_ds))
-    y = get_t_curve(cfg, cfg.v_ds_ret)
+    v_ds_pct = [100.0 * (x - 1.0) for x in cfg.v_ds_ret]  # preserve cfg order, no sort
+    dx, a, b, c = cfg.solver_t_params
+    y = get_density_for_bimodal_t_dist(v_ds_pct, dx, a, b, c)
     y_scaled = y ./ maximum(y)
     return y_scaled .* dct_nlv_by_ds[1.0]
 end
 
 """
-    get_total_objective(pf, cfg, scoped_options, m_dnlv01_buy, m_dnlv01_sell; weight_max_t_curve) -> Float64
+    get_total_objective(pf, cfg, scoped_options, m_dnlv01_buy, m_dnlv01_sell) -> Float64
 """
-function get_total_objective(pf::Portfolio, cfg::EarningsConfig, scoped_options, m_dnlv01_buy, m_dnlv01_sell; weight_max_t_curve::Float64=5.0)::Float64
+function get_total_objective(pf::Portfolio, cfg::EarningsConfig, scoped_options, m_dnlv01_buy, m_dnlv01_sell)::Float64
     v_q = holdings2v_q(pf, scoped_options)
     nlv_by_ds = get_nlv_by_ds(v_q, m_dnlv01_buy, m_dnlv01_sell)
     dct_nlv_by_ds = Dict(zip(cfg.v_ds_ret, nlv_by_ds))
     v_target_dnlv = get_v_target_dnlv(pf, cfg, scoped_options, m_dnlv01_buy, m_dnlv01_sell)
-    earning_ds0 = dct_nlv_by_ds[1.0] * weight_max_t_curve
-    nlv_mn_t_curve = min.(nlv_by_ds .- v_target_dnlv, 0.0)
+    earning_ds0 = dct_nlv_by_ds[1.0] * cfg.weight_max_t_curve
+    nlv_mn_t_curve = nlv_by_ds .- v_target_dnlv
+    if !isnothing(cfg.weight_wing_lift) && cfg.weight_wing_lift != 0.0
+        nlv_mn_t_curve = nlv_mn_t_curve .- dct_nlv_by_ds[1.0] * cfg.weight_wing_lift
+    end
+    nlv_mn_t_curve = min.(nlv_mn_t_curve, 0.0)
     return earning_ds0 + sum(nlv_mn_t_curve)
 end
 
 """
-    get_marginal_objective_by_holding(pf, cfg, scoped_options, m_dnlv01_buy, m_dnlv01_sell; weight_max_t_curve) -> Dict
+    get_marginal_objective_by_holding(pf, cfg, scoped_options, m_dnlv01_buy, m_dnlv01_sell) -> Dict
 """
-function get_marginal_objective_by_holding(pf::Portfolio, cfg::EarningsConfig, scoped_options, m_dnlv01_buy, m_dnlv01_sell; weight_max_t_curve::Float64=1.0)::Dict
-    total_obj_pf = get_total_objective(pf, cfg, scoped_options, m_dnlv01_buy, m_dnlv01_sell; weight_max_t_curve)
+function get_marginal_objective_by_holding(pf::Portfolio, cfg::EarningsConfig, scoped_options, m_dnlv01_buy, m_dnlv01_sell)::Dict
+    total_obj_pf = get_total_objective(pf, cfg, scoped_options, m_dnlv01_buy, m_dnlv01_sell)
     out = Dict()
     for h in pf
         pf_tmp = copy(pf)
-        d_q = sign(h.quantity)
-        add_holding!(pf_tmp, h.symbol, -d_q)
-        obj_tmp = get_total_objective(pf_tmp, cfg, scoped_options, m_dnlv01_buy, m_dnlv01_sell; weight_max_t_curve)
-        out[h.symbol] = d_q * (total_obj_pf - obj_tmp)
+        add_holding!(pf_tmp, h.symbol, -sign(h.quantity))
+        obj_tmp = get_total_objective(pf_tmp, cfg, scoped_options, m_dnlv01_buy, m_dnlv01_sell)
+        out[Holding(h.symbol, sign(h.quantity))] = total_obj_pf - obj_tmp
     end
     return out
 end
@@ -156,6 +170,9 @@ end
 For each holding, remove 1 unit and measure the drop in weighted PnL + directional skew improvement.
 Note: unlike the Python version, this does NOT delta-hedge when computing marginal utility
 (that would require scipy.optimize). The hedge effect is omitted here.
+
+Can lead to negative marginal utility. Utility must be derived from the objective function, not this custom pnl/skew stuff.
+Object metric has way off scale though, so needs to be normalized by PnL.
 """
 function get_marginal_utility_by_holding(
     scoped_options,
@@ -192,10 +209,30 @@ function get_marginal_utility_by_holding(
         utility        = dPL + delta_dPLuPLd #+ weight_util_q_eq * d_abs_eq_position
 
         @info "$(h.symbol): utility=$(utility), dPL=$(dPL), delta_dPLuPLd=$(delta_dPLuPLd)"  # , deltaReduction={weight_util_q_eq * d_abs_eq_position}')
-        out[h.symbol] = utility
+        out[Holding(h.symbol, sign(h.quantity))] = utility
     end
     return out
 end
+
+"""
+Marginal contribution of each holding, expressed in monetary terms.
+
+Scales `get_marginal_objective_by_holding` into the same monetary frame as `weighted_dnlv`
+(the desired return profile / t_curve), by multiplying by the ratio:
+
+    weighted_dnlv / total_objective
+
+This preserves the tail-risk-aware structure of the objective (which `weighted_dnlv` alone
+ignores) while expressing results in dollars so signs and magnitudes are meaningful.
+"""
+function get_normalized_objective_by_holding(
+    marginal_objective_by_holding::Dict,
+    pf_total_objective,
+    pf_total_pnl,
+)::Dict
+    return Dict(k => pf_total_pnl * (v / pf_total_objective) for (k, v) in marginal_objective_by_holding)
+end
+
 
 # ─── Main entry point ─────────────────────────────────────────────────────────
 
@@ -216,16 +253,18 @@ function get_stress_test_ds(
     nlv_by_ds  = get_nlv_by_ds(v_q, m_dnlv01_buy, m_dnlv01_sell)
     dct_nlv_by_ds = Dict(zip(cfg.v_ds_ret, nlv_by_ds))
     delta_total = dot(v_q, v_delta0)
-
+    pf_total_objective = get_total_objective(pf, cfg, scoped_options, m_dnlv01_buy, m_dnlv01_sell)
+    marginal_objective_by_holding = get_marginal_objective_by_holding(pf, cfg, scoped_options, m_dnlv01_buy, m_dnlv01_sell)
+    pf_total_pnl = get_weighted_dlnv(dct_nlv_by_ds, cfg)
     return StressTestDsResult(
         pf,
         dct_nlv_by_ds,
         delta_total,
         get_delta_total_across_ds(dct_nlv_by_ds, cfg, s0);
-        weighted_dnlv = get_weighted_dlnv(dct_nlv_by_ds, cfg),
-        marginal_utility_by_holding = get_marginal_utility_by_holding(scoped_options, pf, m_dnlv01_buy, m_dnlv01_sell, cfg, dct_nlv_by_ds),
-        total_objective = get_total_objective(pf, cfg, scoped_options, m_dnlv01_buy, m_dnlv01_sell; weight_max_t_curve=1.0),
-        marginal_weighted_objective_by_holding = get_marginal_objective_by_holding(pf, cfg, scoped_options, m_dnlv01_buy, m_dnlv01_sell; weight_max_t_curve=1.0),
+        weighted_dnlv = pf_total_pnl,
+        marginal_utility_by_holding = get_normalized_objective_by_holding(marginal_objective_by_holding, pf_total_objective, pf_total_pnl),
+        total_objective = pf_total_objective,
+        marginal_weighted_objective_by_holding = marginal_objective_by_holding,
         tag = tag
     )
 end

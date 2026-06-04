@@ -751,7 +751,7 @@ def get_moneyness_fwd(
         yield_curve = yield_curve_in or YieldCurve().get_last_zero_curve(t0, equity)
         t1 = add_year_fraction(t0, tenor)
         cash_dividends: List[Dividend] = get_dividends(equity.symbol.upper(), t0)
-        div_yield = float(get_dividend_yield(equity)) if not cash_dividends else 0.0
+        div_yield = 0.0
 
         spot_fwd = forward_from_curve_and_divs(
             spot=spot,
@@ -1695,7 +1695,7 @@ def get_dividend_yield(equity: str | Equity, ts: datetime.date = None) -> float:
     key = (equity if isinstance(equity, str) else equity.symbol).upper()
     if key not in DividendYield:
         traceback_str = ''.join(traceback.format_stack())
-        warning(f'No dividend yield for {key}. Defaulting to 0. {traceback_str}')
+        # warning(f'No dividend yield for {key}. Defaulting to 0. {traceback_str}')
     return DividendYield.get(key, 0)
 
 

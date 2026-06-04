@@ -4,7 +4,6 @@ using Test
 using HTTP
 using HTTP.WebSockets: WebSocket
 using ProtoBuf
-#using Fino
 using Fino.WS: ChannelPb, ActionPb, MessagePb
 
 const WS_URL = "ws://127.0.0.1:8002/ws"

@@ -71,32 +71,11 @@ function get_nlv_delta_matrix(
         error("DivideError will occur: tenors_1 has $(length(bad_t1)) zero/negative value(s)")
     end
 
-    # ── Step 1: back-solve IV from bid/ask prices at t0 (one GPU batch each) ──
-    ivs_bid_0 = get_v_iv_fd(
-        prices_bid_0, spots_0, strikes, tenors_0, v_is_call,
-        rates_curve, rates_times, div_amounts, div_times;
-            time_steps, space_steps,
-    )
-    ivs_ask_0 = get_v_iv_fd(
-        prices_ask_0, spots_0, strikes, tenors_0, v_is_call,
-        rates_curve, rates_times, div_amounts, div_times;
-            time_steps, space_steps,
-    )
+    # ── Step 1: NLV at t0 directly from market bid/ask prices ─────────────
+    nlv0_bid = prices_bid_0 .* multiplier
+    nlv0_ask = prices_ask_0 .* multiplier
 
-    # ── Step 2: price at t0 with solved IVs (bid/ask) ─────────────────────
-    nlv0_bid = get_v_price_fd(
-        spots_0, strikes, tenors_0, ivs_bid_0, v_is_call,
-        rates_curve, rates_times, div_amounts, div_times;
-            time_steps, space_steps,
-    ) .* multiplier
-
-    nlv0_ask = get_v_price_fd(
-        spots_0, strikes, tenors_0, ivs_ask_0, v_is_call,
-        rates_curve, rates_times, div_amounts, div_times;
-            time_steps, space_steps,
-    ) .* multiplier
-
-    # ── Step 3: price under each dS scenario at t1 ────────────────────────
+    # ── Step 2: price under each dS scenario at t1 ────────────────────────
     # Flatten all scenarios into one big GPU batch: (n_ds * n_options,)
     n_total    = n_ds * n_options
 
@@ -116,7 +95,7 @@ function get_nlv_delta_matrix(
     # Reshape back to (n_ds × n_options)
     nlv1 = reshape(prices_1_flat, n_options, n_ds)'   # (n_ds × n_options)
 
-    # ── Step 4: compute the four dNLV matrices ─────────────────────────────
+    # ── Step 3: compute the four dNLV matrices ─────────────────────────────
     nlv0_bid_row = reshape(nlv0_bid, 1, n_options)    # broadcast over n_ds
     nlv0_ask_row = reshape(nlv0_ask, 1, n_options)
 

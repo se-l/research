@@ -442,3 +442,66 @@ def get_df_xy(df: pd.DataFrame, dates: List[date]):
     v_ts_scoped = v_ts[np.isin(v_ts.date, np.array(dates)) & (v_ts.hour >= 10) & (v_ts.hour < 16)]
 
     return df.loc[v_ts_scoped]
+
+
+def remove_outdated_cache():
+    """
+    Load every option_frame from cache
+    if create date is older than last_modified date of dependent files, delete it.
+
+    Also delete any v_ivs based on that frame...
+    """
+    import os, pickle
+    for root, dirs, fns in os.walk(Paths.path_analysis_frames):
+        for i, fn in enumerate(fns):
+            if i % 500 == 0:
+                print(i)
+            if fn.startswith('option_frame-'):
+                p = os.path.join(root, fn)
+                try:
+                    with open(p, 'rb') as f:
+                        obj: OptionFrame = pickle.load(f)
+                except ModuleNotFoundError:
+                    print(f'Error Removed {p}')
+                    os.remove(p)
+                    continue
+                # get option data file
+                dir_ = Paths.path_data.joinpath('option\\usa\\second', obj.equity.symbol.lower())
+                fp = dir_.joinpath(f'{obj.start.strftime('%Y%m%d')}_quote_american.zip')
+                if not os.path.exists(fp):
+                    continue
+                mtime_src = os.path.getmtime(fp)
+                mtime_frame = os.path.getmtime(p)
+                if mtime_src > mtime_frame:
+                    print(f'Removed {p}')
+                    os.remove(p)
+
+def remove_invalid_v_ivs(tag='v_ivs'):
+    import os, pickle
+    from options.helper import get_pkl_cache_key
+    for root, dirs, fns in os.walk(Paths.path_analysis_frames):
+        for i, fn in enumerate(fns):
+            if i % 500 == 0:
+                print(i)
+            if fn.startswith(tag):
+                p = os.path.join(root, fn)
+                try:
+                    with open(p, 'rb') as f:
+                        obj: List[IVSurface] = pickle.load(f)
+                except ModuleNotFoundError:
+                    print(f'Error Removed {p}')
+                    os.remove(p)
+                    continue
+                if len(obj) == 0:
+                    print(f'No surfaced Removed {p}')
+                    os.remove(p)
+                    continue
+                ivs = obj[0]
+                fn = get_pkl_cache_key('option_frame', *(ivs.underlying, [ivs.last_calibration_ts().date()], (), (), Resolution.second,  0.002))
+                fp = os.path.join(root, fn)
+                if not os.path.exists(fp):
+                    print(f'Removed, no frame: {p}')
+                    os.remove(p)
+
+if __name__ == '__main__':
+    remove_outdated_cache()

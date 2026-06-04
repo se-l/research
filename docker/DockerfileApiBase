@@ -1,0 +1,55 @@
+FROM python:3.14-slim-bookworm
+
+WORKDIR /usr/app/
+
+COPY ./repos/research/docker/requirements_ws.txt ./requirements_ws.txt
+RUN pip install --no-cache-dir -r ./requirements_ws.txt
+
+RUN apt-get update && apt-get install -y \
+    gcc g++ gfortran git patch wget pkg-config libblas-dev liblapack-dev libmetis-dev \
+    coinor-cbc make curl grep
+
+# https://coin-or.github.io/Ipopt/INSTALL.html
+# ASL (Ampl Solver Library)
+RUN cd ~ && \
+    git clone https://github.com/coin-or-tools/ThirdParty-ASL.git && \
+    cd ThirdParty-ASL && \
+    ./get.ASL && \
+    ./configure --disable-dependency-tracking && \
+    make && make install
+
+# MUMPS Linear Solver
+RUN cd ~ && \
+    git clone https://github.com/coin-or-tools/ThirdParty-Mumps.git && \
+    cd ThirdParty-Mumps && \
+    ./get.Mumps && \
+    ./configure && \
+    make && \
+    make install
+
+# ThirdParty-HSL
+RUN cd ~ && git clone https://github.com/coin-or-tools/ThirdParty-HSL.git
+COPY ./software/coinhsl-archive-2023.11.17.tar.gz /root/ThirdParty-HSL/coinhsl-archive-2023.11.17.tar.gz
+RUN cd ~/ThirdParty-HSL && \
+    tar -xzf coinhsl-archive-2023.11.17.tar.gz && \
+    mv ./coinhsl-archive-2023.11.17 ./coinhsl && \
+    ./configure && \
+    make && \
+    make install
+
+# Ipopt
+RUN cd ~ && git clone https://github.com/coin-or/Ipopt.git && cd Ipopt && mkdir build && cd build && ../configure && make && make install
+RUN export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/local/lib/
+
+# Install package to mount cifs drive
+RUN apt-get update && apt-get install -y cifs-utils && apt-get install -y dnsutils
+
+# Tell PythonCall to use system Python, skip CondaPkg
+ENV JULIA_PYTHONCALL_EXE="/usr/local/bin/python3"
+ENV JULIA_CONDAPKG_BACKEND="Null"
+
+# Install Julia
+RUN curl -fsSL https://install.julialang.org | sh -s -- -y && \
+    /root/.juliaup/bin/juliaup add 1.12.6 && \
+    /root/.juliaup/bin/juliaup default 1.12.6
+ENV PATH="/root/.juliaup/bin:/root/.julia/bin:${PATH}"

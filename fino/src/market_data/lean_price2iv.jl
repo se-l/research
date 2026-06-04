@@ -1,73 +1,20 @@
 # store_iv.jl
-# Julia Script
-
-#=
-
-Description: You are given 3 files gouped by date, eg, 20250605_quote_american.zip, 20250605_trade_american.zip and 20250605_quote.zip.
-All prices in basis points: 1/10_000
-All times are ms since midnight
-Containing the following schemas:
-
-Equity Trade / 20250605_quote.zip.
-msSinceMidnight|PriceBid|SizeBid|PriceAsk|SizeAsk|NotRelevant|NotRelevant|NotRelevant
-14340016.3	0	0	0	0			0
-
-Option Trade 20250605_trade_american.zip
-msSinceMidnight|Price|Size|NotRelevant|NotRelevant|NotRelevant
-34219926	147800	13			0
-
-
-Option Quote 20250605_quote_american.zip
-msSinceMidnight|PriceBid|SizeBid|PriceAsk|SizeAsk|NotRelevant|NotRelevant
-34201251.65	240500	1	323500	1		0
-
-We need to convert the option bid ask prices to bid ask implied volatilities using batch GPU calculators.
-
-Target schema output is:
-msSinceMidnight|UnderlyingPrice.Close|PriceBid?.Close ?? 0|IvBid?.Close ?? 0|PriceAsk?.Close|IvAsk?.Close";
-
-Please devise a scripts that in sequence:
-1. Read in a quote file above from
-D:\trade\data\option\usa\second
-and
-D:\trade\data\equity\usa\second
-1. Creates input vectors needed by get_v_iv_fd
-2. Important to recognize that spots are mid price from equity. and these can never front run option quotes, need to fill forwards equtity spots
-3. metrics such as strike, right, tenor are parsed from the .csv name of the zip archive.
-20260109_dal_second_quote_american_call_200000_20260116.csv
-so that's trade date, ticker, right  strike in basis points and last, tenor
-4. Calculation datetime is the zip dates + given timestamp
-5. Rates come from YieldCurve.get_last_zero_curve(calculation_date::Date,
-                             ticker::String="",
-                             delta_days::Int=-14,
-                             market::String="usa")
-5. Dividends come from get_dividend_amount_times
-6. Each zip entry name is
-    string entryName = $"{date:yyyyMMdd}_{underlying.Value}_{resolution}_{tickType.TickTypeToLower()}_american_{symbol.ID.OptionRight}_{Math.Round(symbol.ID.StrikePrice * 10000m)}_{symbol.ID.Date:yyyyMMdd}.csv".ToLowerInvariant();
-6. THe zip file name stored next to where quote.zip was from should be names:
- $"{optionPath}_{date.Year}_{tickTypeString}_{symbol.ID.OptionStyle.OptionStyleToLower()}.zip";
-
-Author: seb
-Date: 4/13/2026
-=#
-
-# For a given date, reads equity + option quote zips, aligns spots (no look-ahead),
-# fetches rates & dividends, then batch-computes bid/ask IVs via get_v_iv_fd.
+include(joinpath(@__DIR__, "../init.jl"))
 
 using ZipFile, Dates, DataFrames, CSV
 
-using ..PricingEngine
-using ..DividendManager
-using ..YieldCurve
-using ..Paths
+using Fino.PricingEngine
+using Fino.DividendManager
+using Fino.YieldCurve
+using .Fino.Paths
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Config
 # ─────────────────────────────────────────────────────────────────────────────
 
-const OPTION_SECOND_DIR = raw"D:\trade\data\option\usa\second"
-const EQUITY_SECOND_DIR = raw"D:\trade\data\equity\usa\second"
-const OUTPUT_DIR      = raw"D:\trade\data\option\usa\second"
+const OPTION_SECOND_DIR = joinpath(PATH_DATA, "option", "usa", "second")
+const EQUITY_SECOND_DIR = joinpath(PATH_DATA, "equity", "usa", "second")
+const OUTPUT_DIR        = joinpath(PATH_DATA, "option", "usa", "second")
 
 const BP = 10_000f0   # basis-point divisor
 
@@ -415,6 +362,10 @@ end
 # Assemble per-entry result DataFrames from scattered IV results
 # ─────────────────────────────────────────────────────────────────────────────
 
+function safe_round_int64(v::Number)::Union{Int64, Missing}
+    isnan(v) ? missing : round(Int64, v)
+end
+
 function assemble_result(
     e        ::EntryData,
     bid_idxs ::Vector{Int},
@@ -423,17 +374,17 @@ function assemble_result(
 )::DataFrame
 
     n        = length(e.ms_vec)
-    ms_out   = round.(Int64, e.ms_vec)
-    spot_out = round.(Int64, e.spots .* BP)
+    ms_out   = safe_round_int64.(e.ms_vec)
+    spot_out = safe_round_int64.(e.spots .* BP)
 
     if e.is_trade
         # output: ms, underlyingPrice, tradedPrice, IV
-        price_out = round.(Int64, e.bid .* BP)
+        price_out = safe_round_int64.(e.bid .* BP)
         iv_out    = Vector{Union{Int64,Missing}}(missing, n)
         for i in 1:n
             if bid_idxs[i] > 0
                 v = iv_all[bid_idxs[i]]
-                isnan(v) || (iv_out[i] = round(Int64, v * BP))
+                iv_out[i] = safe_round_int64(v * BP)
             end
         end
         return DataFrame(
@@ -443,18 +394,18 @@ function assemble_result(
             iv              = iv_out)
     else
         # output: ms, spot, price_bid, iv_bid, price_ask, iv_ask
-        price_bid_out = round.(Int64, e.bid .* BP)
-        price_ask_out = round.(Int64, e.ask .* BP)
+        price_bid_out = safe_round_int64.(e.bid .* BP)
+        price_ask_out = safe_round_int64.(e.ask .* BP)
         iv_bid_out    = Vector{Union{Int64,Missing}}(missing, n)
         iv_ask_out    = Vector{Union{Int64,Missing}}(missing, n)
         for i in 1:n
             if bid_idxs[i] > 0
                 v = iv_all[bid_idxs[i]]
-                isnan(v) || (iv_bid_out[i] = round(Int64, v * BP))
+                iv_bid_out[i] = safe_round_int64(v * BP)
             end
             if ask_idxs[i] > 0
                 v = iv_all[ask_idxs[i]]
-                isnan(v) || (iv_ask_out[i] = round(Int64, v * BP))
+                iv_ask_out[i] = safe_round_int64(v * BP)
             end
         end
         return DataFrame(
@@ -562,9 +513,13 @@ end
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
-function run(; ticker::String, tick_type::TickType, date::Date)
-    process_ticker_date(ticker, tick_type, date)
+if abspath(PROGRAM_FILE) == @__FILE__
+    sym="CRWD"
+    for dt in [
+#        add_trade_days(EarningsPreSessionDates(sym)[end], -1)
+        Date(2026, 6, 3),
+    ]
+        process_ticker_date(sym, TickTrade, dt)
+        process_ticker_date(sym, TickQuote, dt)
+    end
 end
-process_ticker("FDX", after=Date(2023, 12, 14))
-#run(ticker="FDX", tick_type=TickQuote, date=Date(2025, 12, 18))
-#run(ticker="FDX", tick_type=TickTrade, date=Date(2025, 12, 18))
