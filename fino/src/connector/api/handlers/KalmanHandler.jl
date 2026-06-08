@@ -201,6 +201,7 @@ function send_kalman_init(
         init_covariance = [VectorDoublePb(covariance[i, :]) for i in 1:size(covariance, 1)]
         
         resp = ResponseKalmanInitPb(
+            Dates.format(now(Dates.UTC), DT_FMT_PB),
             req,
             init_state,
             init_covariance
@@ -213,8 +214,11 @@ function send_kalman_init(
         reason = "Error: kalman_init: $e"
         @error reason exception=(e, catch_backtrace())
         send_empty_response(websocket, msg, pb2bytes(ResponseKalmanInitPb(
-                req, Vector{SSVIParamsPb}(), Vector{VectorDoublePb}()
-            )), reason=reason)
+            Dates.format(now(Dates.UTC), DT_FMT_PB),
+            req,
+            Vector{SSVIParamsPb}(),
+            Vector{VectorDoublePb}()
+        )), reason=reason)
     end
 end
 

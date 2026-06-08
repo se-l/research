@@ -1,6 +1,5 @@
 
-using Pkg
-Pkg.activate("C:\\repos\\research\\fino")
+include(joinpath(@__DIR__, "src\\init.jl"))
 
 # Mocking some dependencies if they are not in the environment
 # But first let's try to just load the file and see if it compiles

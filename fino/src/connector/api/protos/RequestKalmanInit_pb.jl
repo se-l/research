@@ -61,44 +61,50 @@ function PB._encoded_size(x::RequestKalmanInitPb)
 end
 
 struct ResponseKalmanInitPb
+    ts::String
     request::Union{Nothing,RequestKalmanInitPb}
     init_state::Vector{RequestSSVICalibration_pb.SSVIParamsPb}
     init_covariance::Vector{Common_pb.VectorDoublePb}
 end
-PB.default_values(::Type{ResponseKalmanInitPb}) = (;request = nothing, init_state = Vector{RequestSSVICalibration_pb.SSVIParamsPb}(), init_covariance = Vector{Common_pb.VectorDoublePb}())
-PB.field_numbers(::Type{ResponseKalmanInitPb}) = (;request = 1, init_state = 2, init_covariance = 3)
+PB.default_values(::Type{ResponseKalmanInitPb}) = (;ts = "", request = nothing, init_state = Vector{RequestSSVICalibration_pb.SSVIParamsPb}(), init_covariance = Vector{Common_pb.VectorDoublePb}())
+PB.field_numbers(::Type{ResponseKalmanInitPb}) = (;ts = 1, request = 2, init_state = 3, init_covariance = 4)
 
 function PB.decode(d::PB.AbstractProtoDecoder, ::Type{<:ResponseKalmanInitPb}, _endpos::Int=0, _group::Bool=false)
+    ts = ""
     request = Ref{Union{Nothing,RequestKalmanInitPb}}(nothing)
     init_state = PB.BufferedVector{RequestSSVICalibration_pb.SSVIParamsPb}()
     init_covariance = PB.BufferedVector{Common_pb.VectorDoublePb}()
     while !PB.message_done(d, _endpos, _group)
         field_number, wire_type = PB.decode_tag(d)
         if field_number == 1
-            PB.decode!(d, request)
+            ts = PB.decode(d, String)
         elseif field_number == 2
-            PB.decode!(d, init_state)
+            PB.decode!(d, request)
         elseif field_number == 3
+            PB.decode!(d, init_state)
+        elseif field_number == 4
             PB.decode!(d, init_covariance)
         else
             Base.skip(d, wire_type)
         end
     end
-    return ResponseKalmanInitPb(request[], init_state[], init_covariance[])
+    return ResponseKalmanInitPb(ts, request[], init_state[], init_covariance[])
 end
 
 function PB.encode(e::PB.AbstractProtoEncoder, x::ResponseKalmanInitPb)
     initpos = position(e.io)
-    !isnothing(x.request) && PB.encode(e, 1, x.request)
-    !isempty(x.init_state) && PB.encode(e, 2, x.init_state)
-    !isempty(x.init_covariance) && PB.encode(e, 3, x.init_covariance)
+    !isempty(x.ts) && PB.encode(e, 1, x.ts)
+    !isnothing(x.request) && PB.encode(e, 2, x.request)
+    !isempty(x.init_state) && PB.encode(e, 3, x.init_state)
+    !isempty(x.init_covariance) && PB.encode(e, 4, x.init_covariance)
     return position(e.io) - initpos
 end
 function PB._encoded_size(x::ResponseKalmanInitPb)
     encoded_size = 0
-    !isnothing(x.request) && (encoded_size += PB._encoded_size(x.request, 1))
-    !isempty(x.init_state) && (encoded_size += PB._encoded_size(x.init_state, 2))
-    !isempty(x.init_covariance) && (encoded_size += PB._encoded_size(x.init_covariance, 3))
+    !isempty(x.ts) && (encoded_size += PB._encoded_size(x.ts, 1))
+    !isnothing(x.request) && (encoded_size += PB._encoded_size(x.request, 2))
+    !isempty(x.init_state) && (encoded_size += PB._encoded_size(x.init_state, 3))
+    !isempty(x.init_covariance) && (encoded_size += PB._encoded_size(x.init_covariance, 4))
     return encoded_size
 end
 end # module

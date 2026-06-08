@@ -242,10 +242,7 @@ function send_pf_risk_scenarios(websocket, req::RequestPfRiskScenariosPb, cache_
             req.underlying,
             pf_risk_scenarios
         ))
-        if websocket.writeclosed
-            @warn "send_pf_risk_scenarios: WebSocket already closed, dropping response"
-            return
-        end
+
         send_response(websocket, msg, payload, cache_request_key)
         cache_result(cache_request_key, payload)
         @info "[$(now())] send_pf_risk_scenarios: finished"

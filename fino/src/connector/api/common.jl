@@ -5,6 +5,7 @@ using HTTP
 using HTTP.WebSockets
 using Logging
 using ProtoBuf
+using AMQPClient
 
 using ...Fino: Paths, Security, Holding, SecurityType, security_type_equity, security_type_option, option_right_call, option_right_put, OptionRight, Option,
     option_from_ib_symbol, EarningsConfig, Portfolio, StressTestDsResult, Equity
@@ -31,6 +32,54 @@ Base.convert(::Type{SecurityType}, pb::SecurityTypePb.T) = _SEC_TYPE_FROM_PB[pb]
 
 Base.convert(::Type{OptionRightPb.T}, s::OptionRight) = _RIGHT_TO_PB[s]
 Base.convert(::Type{OptionRight}, pb::OptionRightPb.T) = _RIGHT_FROM_PB[pb]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MQConnection — holds the AMQP channel behind a lock
+# ═══════════════════════════════════════════════════════════════════════════════
+
+mutable struct MQConnection
+    chan ::Any
+    lock ::ReentrantLock
+end
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MQContext — replaces `ws` as the first argument to every handler
+#
+# Carries the connection plus per-message metadata needed to route the
+# response.  `send(ctx, data)` mirrors `send(ws, data)` so existing
+# handler code needs only a signature change (ws → ctx).
+# ═══════════════════════════════════════════════════════════════════════════════
+const EXCHANGE_OUT     = "calc_engine.responses"  # topic — outbound results
+
+mutable struct MQContext
+    mq        ::MQConnection
+    reply_to  ::String                   # routing key on EXCHANGE_OUT
+    props     ::Dict{String,Any}         # original request props (correlation_id, …)
+end
+
+function send(ctx::MQContext, data::Vector{UInt8})
+   props = Dict{Symbol, Any}(
+    :correlation_id => get(ctx.props, "correlation_id", ""),
+    :reply_to       => ctx.reply_to,
+    :content_type   => "application/octet-stream",
+    :delivery_mode  => UInt8(2),   # persistent
+    )
+
+    msg = AMQPClient.Message(data;
+        correlation_id = get(ctx.props, "correlation_id", ""),
+        reply_to       = ctx.reply_to,
+        content_type   = "application/octet-stream",
+        delivery_mode  = UInt8(2),
+    )
+
+    lock(ctx.mq.lock) do
+        AMQPClient.basic_publish(ctx.mq.chan, msg;
+            exchange    = EXCHANGE_OUT,
+            routing_key = ctx.reply_to,
+        )
+    end
+end
 
 
 # Holding conversions
@@ -84,10 +133,14 @@ end
     Cache a result payload to disk.
 """
 function cache_result(fn::String, payload::Vector{UInt8})
-    mkpath(Paths.PATH_API_CACHE)
-    cache_path = joinpath(Paths.PATH_API_CACHE, "$(fn)Response.bin")
-    open(cache_path, "w+") do f
-        write(f, payload)
+    try
+        mkpath(Paths.PATH_API_CACHE)
+        cache_path = joinpath(Paths.PATH_API_CACHE, "$(fn)Response.bin")
+        open(cache_path, "w+") do f
+            write(f, payload)
+        end
+    catch e
+        @warn "Failed to cache result to disk" cache_key=fn exception=(e, catch_backtrace())
     end
 end
 
@@ -123,6 +176,18 @@ function get_cache_key_if_not_present(websocket, msg, request, get_key_fn::Funct
 end
 
 
+function send_response(ctx::MQContext, msg::MessagePb, payload::Vector{UInt8}, cache_fn::Union{String, Nothing}=nothing)
+    """
+    send_response(websocket, msg::MessagePb, payload::Vector{UInt8}, cache_fn::Union{String, Nothing}=nothing)
+    """
+    response = MessagePb(msg.channel, msg.id, msg.action, payload)
+    if cache_fn !== nothing
+        cache_result(cache_fn, payload)
+    end
+    
+    send(ctx, pb2bytes(response))
+end
+
 function send_response(websocket, msg::MessagePb, payload::Vector{UInt8}, cache_fn::Union{String, Nothing}=nothing)
     """
     send_response(websocket, msg::MessagePb, payload::Vector{UInt8}, cache_fn::Union{String, Nothing}=nothing)
@@ -132,13 +197,23 @@ function send_response(websocket, msg::MessagePb, payload::Vector{UInt8}, cache_
     if cache_fn !== nothing
         cache_result(cache_fn, payload)
     end
-    
+
     # Serialize and send - adjust based on your WebSocket library
     lock(WS_SEND_LOCK) do
         HTTP.WebSockets.send(websocket, pb2bytes(response))
     end
 end
 
+
+function send_empty_response(ctx::MQContext, msg, payload::Vector{UInt8}; reason::String="")
+    """
+    send_empty_response(websocket, msg::MessagePb, payload::Vector{UInt8}; reason::String="")
+    Send an empty/error response via WebSocket.
+    """
+    @info "$reason. Sending empty response."
+    response = MessagePb(msg.channel, msg.id, ActionPb.SUBSCRIBE, isempty(payload) ? UInt8[] : payload)
+    send(ctx, pb2bytes(response))
+end
 
 function send_empty_response(websocket, msg, payload::Vector{UInt8}; reason::String="")
     """
@@ -255,4 +330,11 @@ function py2stress_inputs(mats)
         pyconvert(Matrix{Float64}, mats.m_dnlv01_estimated_sell),
         pyconvert(Vector{Float64}, mats.v_delta0_mid),
     )
+end
+
+function main()
+    println("Hello, Julia!")
+    foobar = 123
+    println(foobar)
+    println(foobaz)
 end

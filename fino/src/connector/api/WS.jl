@@ -80,7 +80,7 @@ include(joinpath(@__DIR__, "common.jl"))
 export parse_pb, holding2holding_pb, is_response_cached, cache_request, cache_result, send_response, load_response_from_cache,
     send_empty_response, get_density_for_bimodal_t_dist, holdings_pb2portfolio, get_mid_iv_from_cache, get_ordered_holdings, pb2bytes,
     get_cache_key_if_not_present, convert_py_sec2jl_sec2, StressTestDsResult2StressTestDsResult_pb, py2stress_inputs, py2jl_holdings,
-    HoldingPb, WS_SEND_LOCK
+    HoldingPb, WS_SEND_LOCK, MQContext, MQConnection, send, EXCHANGE_OUT
 include(joinpath(@__DIR__, "handlers", "AbstractHandler.jl"))
     export spawn_task, DT_FMT_PB
 

@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Start Julia WS server
-echo "Starting Julia WS server on port ${WsPort:-8002} on host ${WsHost:-0.0.0.0} ..."
-WsHost=${WsHost:-0.0.0.0} WsPort=${WsPort:-8002} julia -t auto --project=/usr/app/research/fino /usr/app/research/fino/src/jobs/run_ws.jl &
+echo "Starting Julia MQ Broker ..."
+julia -t auto --project=/usr/app/research/fino /usr/app/research/fino/src/jobs/run_mq_broker.jl &
 
 # Start Julia ZMQ pricer
 echo "Starting Julia ZMQ pricer on port ${PricerPort:-8102} on host ${PricerHost:-0.0.0.0} ..."

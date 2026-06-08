@@ -160,3 +160,4 @@ cython_debug/
 .idea/
 /options/volatility/figures/
 /articles/option_fills/figures/
+/fino/src/ops/

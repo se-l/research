@@ -472,13 +472,13 @@ function send_ssvi_params(ws, req::RequestSSVICalibrationPb, cache_request_key::
             push!(ssvi_params, param)
         end
 
-        resp = ResponseSSVICalibrationPb(req, ssvi_params)
+        resp = ResponseSSVICalibrationPb(Dates.format(now(Dates.UTC), DT_FMT_PB), req, ssvi_params)
         @info "Sending # calibration results: $(length(ssvi_params))"
         send_response(ws, msg, pb2bytes(resp), cache_request_key)
     catch e
         reason = "Error: ssvi_calibration: $e"
         @error reason exception=(e, catch_backtrace())
-        send_empty_response(ws, msg, pb2bytes(ResponseSSVICalibrationPb(req, SSVIParamsPb[])), reason=reason)
+        send_empty_response(ws, msg, pb2bytes(ResponseSSVICalibrationPb(Dates.format(now(Dates.UTC), DT_FMT_PB), req, SSVIParamsPb[])), reason=reason)
     end
 end
 

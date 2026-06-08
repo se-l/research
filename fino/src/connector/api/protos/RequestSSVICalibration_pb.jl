@@ -187,38 +187,44 @@ function PB._encoded_size(x::SSVIParamsByRightPb)
 end
 
 struct ResponseSSVICalibrationPb
+    ts::String
     request::Union{Nothing,RequestSSVICalibrationPb}
     params::Vector{SSVIParamsPb}
 end
-PB.default_values(::Type{ResponseSSVICalibrationPb}) = (;request = nothing, params = Vector{SSVIParamsPb}())
-PB.field_numbers(::Type{ResponseSSVICalibrationPb}) = (;request = 1, params = 2)
+PB.default_values(::Type{ResponseSSVICalibrationPb}) = (;ts = "", request = nothing, params = Vector{SSVIParamsPb}())
+PB.field_numbers(::Type{ResponseSSVICalibrationPb}) = (;ts = 1, request = 2, params = 3)
 
 function PB.decode(d::PB.AbstractProtoDecoder, ::Type{<:ResponseSSVICalibrationPb}, _endpos::Int=0, _group::Bool=false)
+    ts = ""
     request = Ref{Union{Nothing,RequestSSVICalibrationPb}}(nothing)
     params = PB.BufferedVector{SSVIParamsPb}()
     while !PB.message_done(d, _endpos, _group)
         field_number, wire_type = PB.decode_tag(d)
         if field_number == 1
-            PB.decode!(d, request)
+            ts = PB.decode(d, String)
         elseif field_number == 2
+            PB.decode!(d, request)
+        elseif field_number == 3
             PB.decode!(d, params)
         else
             Base.skip(d, wire_type)
         end
     end
-    return ResponseSSVICalibrationPb(request[], params[])
+    return ResponseSSVICalibrationPb(ts, request[], params[])
 end
 
 function PB.encode(e::PB.AbstractProtoEncoder, x::ResponseSSVICalibrationPb)
     initpos = position(e.io)
-    !isnothing(x.request) && PB.encode(e, 1, x.request)
-    !isempty(x.params) && PB.encode(e, 2, x.params)
+    !isempty(x.ts) && PB.encode(e, 1, x.ts)
+    !isnothing(x.request) && PB.encode(e, 2, x.request)
+    !isempty(x.params) && PB.encode(e, 3, x.params)
     return position(e.io) - initpos
 end
 function PB._encoded_size(x::ResponseSSVICalibrationPb)
     encoded_size = 0
-    !isnothing(x.request) && (encoded_size += PB._encoded_size(x.request, 1))
-    !isempty(x.params) && (encoded_size += PB._encoded_size(x.params, 2))
+    !isempty(x.ts) && (encoded_size += PB._encoded_size(x.ts, 1))
+    !isnothing(x.request) && (encoded_size += PB._encoded_size(x.request, 2))
+    !isempty(x.params) && (encoded_size += PB._encoded_size(x.params, 3))
     return encoded_size
 end
 end # module

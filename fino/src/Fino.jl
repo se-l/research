@@ -69,7 +69,7 @@ function ensure_py_initialized_fino()
 
     # Must patch PATH before any pyomo imports
     os = pyimport("os")
-    ipopt_dir = os.environ.get('IPOPT')
+    ipopt_dir = pyconvert(String, os.environ.get("IPOPT", ""))
     current_path = pyconvert(String, os.environ["PATH"])
     if !contains(current_path, ipopt_dir)
         os.environ["PATH"] = ipopt_dir * ";" * current_path
@@ -167,6 +167,8 @@ include(joinpath(@__DIR__, "types", "calibration_item.jl"))
 export CalibrationItem, downsample, df2calibration_items, union_calibration_items
 include(joinpath(@__DIR__, "connector", "api", "WS.jl"))
 export WS
+include(joinpath(@__DIR__, "connector", "api", "MQMsgBroker.jl"))
+export MQMsgBroker
 
 end # module Fino
 

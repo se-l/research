@@ -117,8 +117,6 @@ function send_target_portfolios(websocket, req::RequestTargetPortfoliosPb, cache
 
         @info "Sending # portfolios: $(length(response_pb.target_portfolios))"
         send_response(websocket, msg, pb2bytes(response_pb), cache_key)
-        cache_result(cache_key, pb2bytes(response_pb))
-
     catch e
         bt = catch_backtrace()
         if e isa PythonCall.PyException
