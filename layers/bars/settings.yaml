@@ -1,0 +1,95 @@
+bitfinex:
+  ethusd:
+    price:
+      unit_size: 0.1
+    volatility:
+      resampling_rule: "1D"
+      span: "30D"
+      weighting: "ewm"
+    volume:
+      tick: 100
+      ethusd: 30
+      usd: 100_000
+    trade imbalance:
+      ethusd: 30
+      tick: 30
+      usd: 75_000
+    order book:
+      level_from_price_haircut: 0.002
+      delta_size_ratio: 0.5
+    trade sequence:
+      ethusd: 30
+      tick: 100
+      usd: 100_000
+  btcusd:
+    price:
+      unit_size: 5
+    order book:
+      level_from_price_haircut: 0.002
+      delta_size_ratio: 0.5
+    volume:
+      tick: 100
+      btcusd: 5
+      usd: 200_000
+    trade imbalance:
+      btcusd: 5
+      tick: 50
+      usd: 150_000
+    trade sequence:
+      btcusd: 5
+      tick: 100
+      usd: 300_000
+  solusd:
+    price:
+      unit_size:
+    order book:
+      level_from_price_haircut: 0.002
+      delta_size_ratio: 0.5
+    volume:
+      tick: 10
+      solusd: 50
+      usd: 10_000
+    trade imbalance:
+      solusd: 40
+#      tick: 20
+      usd: 4_000
+    trade sequence:
+      solusd: 30
+      tick: 10
+      usd: 3_000
+  adausd:
+    price:
+      unit_size:
+    order book:
+      level_from_price_haircut: 0.002
+      delta_size_ratio: 0.5
+    volume:
+      tick: 10
+      adausd: 3_000
+      usd: 5_000
+    trade imbalance:
+      adausd: 1_000
+#      tick: 10
+      usd: 1_500
+    trade sequence:
+      adausd: 50
+      tick: 10
+      usd: 1_000
+  xrpusd:
+    price:
+      unit_size:
+    order book:
+      level_from_price_haircut: 0.002
+      delta_size_ratio: 0.5
+    volume:
+      tick: 50
+      xrpusd: 10_000
+      usd: 30_000
+    trade imbalance:
+      xrpusd: 10_000
+      tick: 15
+      usd: 7_000
+    trade sequence:
+      xrpusd: 1000
+      tick: 50
+      usd: 3_000
