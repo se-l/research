@@ -1049,33 +1049,6 @@ def rolling_cone(implied_volatility, lookback_period, confidence_levels):
     return cones
 
 
-def atm_iv_old_method(trades, quotes, optionContracts, n=1, resolution='60min'):
-    """
-    consider adding outlier remover. cut any beyond 3 sigma
-    """
-    mat_df = iv_of_expiry(optionContracts, trades, quotes, resolution=resolution)
-    df_strike_iv = pd.DataFrame({float(k.split('_')[3]) / 10_000: (df['mid_iv']) for k, df in mat_df.items()}).fillna(method='ffill')
-    df_strike_iv = df_strike_iv.sort_index(axis=1)
-    ps_t = pd.concat(df['mid_close_underlying'] for df in mat_df.values()).dropna()
-    ps_t = ps_t[~ps_t.index.duplicated(keep='first')].sort_index()
-
-    strikes = np.array([float(el) for el in df_strike_iv.columns])
-    df_strike_distance = client.strike_to_atm_distance(ps_t, strikes)
-    intersect_index = df_strike_iv.index.intersection(df_strike_distance.index)
-
-    df_strike_iv = df_strike_iv.loc[intersect_index]
-    df_strike_distance = df_strike_distance.loc[intersect_index]
-    df_strike_distance = df_strike_distance.sort_index(axis=1)
-    assert df_strike_iv.shape == df_strike_distance.shape, 'require identical shapes. timeseries and strikes'
-    assert df_strike_distance.columns.to_list() == df_strike_iv.columns.to_list(), 'require identical strikes'
-    strike_levels = list(range(-n, n + 1))
-
-    df_atm_iv = df_strike_iv * ((df_strike_distance.isin(strike_levels)) * 1)
-    count_ivs = (df_atm_iv != 0).sum(axis=1)
-
-    return pd.Series(df_atm_iv.sum(axis=1) / count_ivs, index=df_strike_iv.index)
-
-
 def aewma(vec: pd.Series | np.ndarray, alpha: float, gamma: float) -> np.ndarray:
     """adaptive exponentially weighted moving average. alpha-1, no smoothing always latest value. alpha 0 - max smooth always first value"""
     ewmas = np.zeros_like(vec)
@@ -1495,9 +1468,9 @@ def spot_from_df_equity_into_options(option_frame: OptionFrame):
     option_frame.df_options['spot'] = option_frame.df_options['spot'].astype(float)
 
 
-def val_from_df(df, expiry, strike, right, col_nm):
+def val_from_df(df, expiry, strike, right, col_nm, ix=-1):
     if 'ts' in df.index.names:
-        return df[col_nm].loc[(slice(None), expiry, strike, right)].iloc[-1]
+        return df[col_nm].loc[(slice(None), expiry, strike, right)].iloc[ix]
     return df[col_nm].loc[(expiry, strike, right)]
 
 
@@ -1701,58 +1674,6 @@ def get_dividend_yield(equity: str | Equity, ts: datetime.date = None) -> float:
 
 def spread_pc(moneyness, tenor):
     return 1 / (abs(moneyness - 1) + 1) - (tenor / 2) ** 0.3
-
-
-def df2atm_iv(df: pd.DataFrame, ps_spot, net_yield: float, min_dte=14) -> pd.Series:
-    """
-    Weighted average of atm strikes for call & put. Expiry is tricky: too early and it slopes up too much. Cannot pick a single expiry
-    as DTE would vary too much leaving DTE variance behind. If fixing DTE at 14, just weighted average of closest expiries or more?
-    Simplest: Just take weighted average of all expiries... While it's ATM, it's not as useful as we're interested in getting a market estimate/indicator of
-    future volatility.
-    """
-    v_ts = []
-    v_atm_iv = []
-
-    # Loop through time
-    for ts, sub_df in df.groupby(level='ts'):
-        v_ts.append(ts)
-        spot = ps_spot.loc[ts]['close']
-        sub_v_atm_iv = []
-
-        for expiry, sub_sub_df in sub_df.groupby(level='expiry'):
-            if (expiry - ts.date()).days <= min_dte:
-                continue
-            # ATM strike K when K ~= FV(S) = S * exp((r - q) * (T - t)); Same as using S ~= PV(K) = K * exp(-(r - q) * (T - t))
-
-            pv_strikes = {strike: ATMHelper(expiry, float(strike), ts.date(), net_yield).PV_K() for strike in sub_sub_df.index.get_level_values('strike').unique()}
-            pv_strikes_minus_spot = {s: pv - spot for s, pv in pv_strikes.items()}
-            try:
-                strike_low = pd.Series({s: v for s, v in pv_strikes_minus_spot.items() if v < 0}).idxmax()
-                strike_high = pd.Series({s: v for s, v in pv_strikes_minus_spot.items() if v > 0}).idxmin()
-            except ValueError as e:
-                print(e)
-                continue
-
-            for right in ['call', 'put']:
-                try:
-                    iv_low = sub_sub_df.loc[(ts, expiry, strike_low, right), 'mid_iv']
-                    iv_high = sub_sub_df.loc[(ts, expiry, strike_high, right), 'mid_iv']
-                except KeyError as e:
-                    print(e)
-                    continue
-
-                # Linearly interpolate ATM
-                iv_atm = iv_low + (iv_high - iv_low) * (spot - float(strike_low)) / (float(strike_high) - float(strike_low))
-                if iv_atm > 0:
-                    sub_v_atm_iv.append(iv_atm)
-            # Normalize IVs across expiries to today ?
-
-        if sub_v_atm_iv:
-            v_atm_iv.append(np.mean(sub_v_atm_iv))
-        else:
-            v_atm_iv.append(np.nan)
-
-    return pd.Series(v_atm_iv, index=v_ts)
 
 
 @lru_cache(maxsize=1)

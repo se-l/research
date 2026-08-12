@@ -1,49 +1,45 @@
 import math
 import os.path
-import pickle
-
 import pandas as pd
 import numpy as np
 
 from importlib import reload
-from functools import partial
+from functools import partial, reduce
 from typing import List
 from itertools import chain
 from datetime import date, time, datetime
 
-from options.types.scope_pre_post import ScopePrePost, scoped_dates
-from options.types.dividend import get_dividends
-from options.types.option import get_vega_cuda, get_delta_cuda
-from options.types.sym_date import SymDate
+from common.modules import resolution
+from options.types.scope_pre_post import ScopePrePost, scoped_dates # JL
+from options.types.dividend import get_dividends # JL
+from options.types.option import get_vega_cuda, get_delta_cuda # JL
+from options.types.sym_date import SymDate # JL
 from shared.modules.logger import info, error
-from shared.paths import Paths
-from shared.constants import EarningsPreSessionDates, USA, SECOND
-from options.helper import find_loc_every_x_pc, spot_from_df_equity_into_options, df2atm_iv, \
-    enrich_atm_iv_by_right, \
-    ps2intrinsic_value, quotes2multi_index_df, load_option_trades, join_spot, join_quotes, ps2mid_iv_if_nonzero, \
-    get_moneyness_fwd, cache_to_disk, get_v_tenor_from_index, df2iv, get_pkl_cache_key
-from options.types.enums import SecurityType, TickType, Resolution, OptionRight
-from options.types.equity import Equity
-from options.client import Client
-from options.types.option_contract import OptionContract
-from options.types.option_frame import OptionFrame
-import options.client as mClient
+from shared.paths import Paths # JL
+from shared.constants import EarningsPreSessionDates, USA, SECOND # JL
+from options.helper import (find_loc_every_x_pc,
+                            spot_from_df_equity_into_options, \
+                            ps2intrinsic_value,
+                            quotes2multi_index_df,
+                            load_option_trades,
+                            join_spot,
+                            join_quotes,
+                            ps2mid_iv_if_nonzero, \
+                            get_moneyness_fwd, # JL
+                            cache_to_disk,
+                            get_v_tenor_from_index,
+                            df2iv, #JL
+                            get_pkl_cache_key # not a good naming system anyway
+                            )
+from options.types.enums import SecurityType, TickType, Resolution, OptionRight #JL
+from options.types.equity import Equity #JL
+from options.client import Client #JL as QCPrices
+from options.types.option_contract import OptionContract  #JL
+from options.types.option_frame import OptionFrame  #JL
+import options.client as mClient #JL as QCPrices
 
 reload(mClient)
 client = mClient.Client()
-
-
-def unpack_mi_df_index(ps: pd.Series) -> tuple:
-    ts = ps.name[0]
-    expiry = ps.name[1]
-    strike = ps.name[2]
-    right = ps.name[3]
-    return ts, expiry, strike, right
-
-
-def ps2mid_iv(ps: pd.Series) -> pd.Series:
-    return (ps['ask_iv'] + ps['bid_iv']) / 2
-
 
 def generate_option_frame(start, end, equity, resolution, seq_ret_threshold, version='1', keep_seconds: List[datetime] = None):
     client = Client()
@@ -54,25 +50,38 @@ def generate_option_frame(start, end, equity, resolution, seq_ret_threshold, ver
     ps_spot = trades_eq[str(equity)]['close']
     # removing non-RTH hours from spot because not present in quotes
     ps_spot = ps_spot[(ps_spot.index.time >= time(9, 30)) & (ps_spot.index.time <= time(16, 0))]
+    print(f"equity_history: len: {(len(ps_spot))} sum close {sum(ps_spot)}")
 
     # refactor to simply loading all of them...
-    contracts = client.central_volatility_contracts(equity, start, end, n=3000)
-    contracts = list(chain(*contracts.values()))
-    print(f'# Contracts loaded: {len(contracts)}')
+    # contracts = client.central_volatility_contracts(equity, start, end, n=3000)
+    # contracts = list(chain(*contracts.values()))
+
+    contracts = client.get_all_contracts(equity, start, end)
+    print(f'# Contracts loaded: {len(contracts)}') # 3373
 
     quotes = client.history(contracts, start, end, resolution, TickType.quote, SecurityType.option)
     quotes = {OptionContract.from_contract_nm(k): v for k, v in quotes.items()}
+    n_rows = reduce(lambda x, y: x + len(y), quotes.values(), 0)
+    print(f"option_quotes_raw: # rows: {n_rows}")
     if not quotes:
         error(f'No option quotes for {equity} in {start} - {end}.')
 
     trades = load_option_trades(contracts, start, end, resolution)
+    n_rows = reduce(lambda x, y: x + len(y), trades.values(), 0)
+    print(f"option_trades_raw: # rows: {n_rows}")
+
     if not trades:
         error(f'No option trades for {equity} in {start} - {end}.')
         df_trades = None
     else:
-        trades = join_spot(trades, ps_spot)
-        trades = join_quotes(trades, quotes)
-        df_trades = quotes2multi_index_df(trades)
+        trades = join_spot(trades, ps_spot)  # 36531 -> 36531
+        trades = join_quotes(trades, quotes)  # quotes: 9112156  -> trades: 36531 -> 36340
+
+        print(f'''After joining ps_spot: 
+              quotes: {reduce(lambda x, y: x + len(y), quotes.values(), 0)}
+              trades: {reduce(lambda x, y: x + len(y), trades.values(), 0)}
+              ''')
+        df_trades = quotes2multi_index_df(trades) # -> 36340
 
     loc = find_loc_every_x_pc(ps_spot, seq_ret_threshold)
     if keep_seconds:
@@ -85,8 +94,12 @@ def generate_option_frame(start, end, equity, resolution, seq_ret_threshold, ver
     for c, df in quotes.items():
         dft = df.merge(pd.DataFrame(index=loc), how='outer', left_index=True, right_index=True).sort_index().ffill()
         quotes[c] = dft.loc[loc]
+    print(f'''After insert ps_spot timestamps: 
+      quotes: {reduce(lambda x, y: x + len(y), quotes.values(), 0)}
+    ''')
 
     ps_spot = ps_spot.loc[loc]
+    print(f"equity_history: len: {(len(ps_spot))} sum close {(sum(ps_spot))}")
     df = quotes2multi_index_df(quotes)
 
     # Dropping expired derivatives - check the speed of this... check by ts.date() not every single ts...
@@ -96,6 +109,9 @@ def generate_option_frame(start, end, equity, resolution, seq_ret_threshold, ver
             if expiry < ts.date():
                 ix_drop.extend(sub_sub_df.index)
     df.drop(ix_drop, inplace=True)
+    print(f'''After dropping expired options: 
+          quotes: {reduce(lambda x, y: x + len(y), quotes.values(), 0)}
+        ''')
 
     # Store
     option_frame = OptionFrame(
@@ -171,40 +187,6 @@ def enrich_quotes(underlying: Equity, option_frame):
                                             t0=df.index.get_level_values('ts').to_pydatetime())
     df['moneyness_fwd_ln'] = np.log(df['moneyness_fwd'])
 
-    return option_frame
-
-
-def enrich_atm_iv(option_frame, net_yield):
-    df = option_frame.df_options
-    df_equity = option_frame.df_equity
-    # dATMIV dS correlation
-    ps_atm_iv = df2atm_iv(df, df_equity, net_yield=net_yield)
-    df['atm_iv'] = None
-    enrich_atm_iv_by_right(df)
-    # ATM IV can be measured in few ways, most importantly which expiries to include and how to weight them.
-    for ts, sub_df in df.groupby(level='ts'):
-        # refactor to calculate any moneyness IV. 90, 100, 110
-        df.loc[(ts, slice(None), slice(None), slice(None)), 'atm_iv'] = ps_atm_iv.loc[ts]
-
-    iv_cols = ['mid_iv', 'atm_iv']
-    for right, sub_df in df.groupby(level='right'):
-        for strike, ss_df in sub_df.groupby(level='strike'):
-            for expiry, sss_df in ss_df.groupby(level='expiry'):
-                sss_df.sort_index(level='ts', inplace=True)
-                sss_df['d_atm_iv'] = sss_df['atm_iv'] - sss_df['atm_iv'].shift(1)
-                df.loc[sss_df.index, 'd_atm_iv'] = sss_df['d_atm_iv']
-                sss_df['dS'] = sss_df['spot'] - sss_df['spot'].shift(1)
-                df.loc[sss_df.index, 'dS'] = sss_df['dS']
-                sss_df['dP'] = sss_df['mid_price'] - sss_df['mid_price'].shift(1)
-                sss_df['dT'] = ((sss_df.reset_index().set_index('ts', drop=False)['ts'] - sss_df.reset_index().set_index('ts', drop=False)['ts'].shift(
-                    1)).apply(lambda x: x.seconds / (3600 * 24)) / 365).values
-                for iv in iv_cols:
-                    sss_df[f'dIV_{iv}'] = (sss_df[iv] - sss_df[iv].shift(1)).values
-                    option_frame.df_options.loc[sss_df.index, f'dIV_{iv}'] = sss_df[f'dIV_{iv}']
-
-                option_frame.df_options.loc[sss_df.index, 'dP'] = sss_df['dP']
-                option_frame.df_options.loc[sss_df.index, 'dS'] = sss_df['dS']
-                option_frame.df_options.loc[sss_df.index, 'dT'] = sss_df['dT']
     return option_frame
 
 
@@ -378,3 +360,19 @@ def available_sym_dates(tickers: str = None, scope: str|ScopePrePost = ScopePreP
             if check_data_presence(SymDate(sym, release_date), scope) or release_date >= date.today():
                 sym_dates.append(SymDate(sym, release_date))
     return sym_dates
+
+if __name__ == '__main__':
+    from datetime import date
+    from options.types.enums import SecurityType, TickType, Resolution
+    from options.types.equity import Equity  # JL
+    from options.client import Client  # JL as QCPrices
+    equity = Equity("ORCL")
+    start = date(2026, 3, 9)
+    end = date(2026, 3, 9)
+    seq_ret_threshold = 0.002
+    resolution = Resolution.second
+    # trades_eq = Client().history([equity], start, end, Resolution.second, TickType.trade, SecurityType.equity)
+    # trades_eq2 = Client().history([equity], start, end, Resolution.minute, TickType.trade, SecurityType.equity)
+    # len(trades_eq[equity.symbol])
+    # len(trades_eq2[equity.symbol])
+    get_option_frame(equity, [start], resolution=Resolution.second, seq_ret_threshold= 0.002)

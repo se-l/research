@@ -5,12 +5,12 @@ import plotly.graph_objs as go
 from collections import defaultdict
 from threading import Lock, Event
 
-from options.types.SSVIParams import SSVISurfParams, SSVITenorParams
-from options.types.scope_pre_post import ScopePrePost, scoped_dates
-from options.types.dividend import get_dividends, Dividend
-from options.types.option_frame import OptionFrame
-from options.types.quote_side import QuoteSide
-from options.types.sym_date import SymDate
+from options.types.SSVIParams import SSVISurfParams, SSVITenorParams  # JL
+from options.types.scope_pre_post import ScopePrePost, scoped_dates # jl
+from options.types.dividend import get_dividends, Dividend # JL
+from options.types.option_frame import OptionFrame # JL
+from options.types.quote_side import QuoteSide # JL
+from options.types.sym_date import SymDate #JL
 from shared.modules.logger import info
 from shared.paths import Paths
 from typing import List, Iterable, Tuple, Dict
@@ -23,8 +23,8 @@ from plotly.subplots import make_subplots
 from options.frame_builder import get_option_frame
 from options.helper import cache_to_disk, find_loc_every_x_pc, timer, exclude_outlier_quotes
 from options.types.calibration_item import df2calibration_items, CalibrationItem
-from options.types.enums import Resolution
-from options.types.equity import Equity
+from options.types.enums import Resolution #JL
+from options.types.equity import Equity #JL
 from options.types.iv_surface_essvi import IVSurface, MetricSSVI
 from shared.plotting import show
 
@@ -250,9 +250,9 @@ def v_ivs_to_weighted_metrics(v_ivs: List[IVSurface]) -> SSVISurfParams:
     for ivs in v_ivs:
         for tenor, ci in ivs.calibration_items.items():
             ivs.params = SSVISurfParams({k: SSVITenorParams(*v) if isinstance(v, tuple) else v for k, v in ivs.params.items()})
-            theta[tenor] = ivs.params[tenor].theta * len(ci.price)
-            rho[tenor] = ivs.params[tenor].rho * len(ci.price)
-            psi[tenor] = ivs.params[tenor].psi * len(ci.price)
+            theta[tenor] += ivs.params[tenor].theta * len(ci.price)
+            rho[tenor] += ivs.params[tenor].rho * len(ci.price)
+            psi[tenor] += ivs.params[tenor].psi * len(ci.price)
             total_sample += len(ci.price)
     inst = SSVISurfParams()
     for dt in theta.keys():
@@ -504,4 +504,9 @@ def remove_invalid_v_ivs(tag='v_ivs'):
                     os.remove(p)
 
 if __name__ == '__main__':
-    remove_outdated_cache()
+    # remove_outdated_cache()
+    equity = Equity("ORCL")
+    dt = date(2026, 3, 9)
+    resolution = Resolution.second
+    seq_ret_threshold=0.002
+    print(get_ivs_by_date(equity, [dt], resolution, seq_ret_threshold, QuoteSide.mid, False, None))

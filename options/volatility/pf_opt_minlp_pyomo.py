@@ -12,13 +12,13 @@ import signal
 from multiprocessing import Process, Queue
 from typing import Tuple, List
 from pprint import pprint
-from pyomo.environ import ConcreteModel, SolverFactory, Constraint, value
+from pyomo.environ import ConcreteModel, SolverFactory, Constraint, value # what's the JL alternative
 from options.helper import apply_ds_ret_weights, cache_to_disk, get_density_for_bimodal_t_dist
-from options.types.earnings_config import EarningsConfig
-from options.types.option import Option
-from options.types.portfolio import Portfolio
+from options.types.earnings_config import EarningsConfig # Jl
+from options.types.option import Option # jl
+from options.types.portfolio import Portfolio # Jl
 from shared.modules.logger import warning, info, error
-from shared.paths import Paths
+from shared.paths import Paths# Jl
 
 
 @dataclass

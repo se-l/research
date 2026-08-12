@@ -12,11 +12,11 @@ from functools import reduce
 from typing import List, Dict, Union, Set, Iterable
 from zipfile import ZipFile
 
-from options.types.security import Security
-from shared.constants import file_root
-from options.types.enums import TickType, CsvHeader, Resolution, SecurityType
-from options.types.equity import Equity
-from options.types.option_contract import OptionContract
+from options.types.security import Security #JL
+from shared.constants import file_root #JL
+from options.types.enums import TickType, CsvHeader, Resolution, SecurityType #JL
+from options.types.equity import Equity #JL
+from options.types.option_contract import OptionContract #JL as Option
 from shared.modules.logger import logger, warning, info
 
 bp = 10_000
@@ -44,6 +44,49 @@ class Client:
         """
         Use the daily option zip files to get a list of option contracts
         """
+        years = {as_of.year}
+        if start:
+            years.add(start.year)
+
+        path_zips = []
+        for year in sorted(years):
+            for tick_type in (TickType.quote, TickType.trade):
+                path_zips.append(os.path.join(self.root, 'option', 'usa', 'daily', f'{symbol.lower()}_{year}_{tick_type}_american.zip'))
+
+        # issue_date per contract key: take the minimum across all zips
+        issue_dates: Dict[str, datetime.date] = {}
+        contracts_by_key: Dict[str, OptionContract] = {}
+
+        for path_zip in path_zips:
+            if not os.path.exists(path_zip):
+                continue
+            tick_nm = TickType.trade if '_trade_' in os.path.basename(path_zip) else TickType.quote
+            csv_header = getattr(CsvHeader, tick_nm)
+            with ZipFile(path_zip, 'r') as zipObj:
+                for csv_nm in zipObj.namelist():
+                    df: pd.DataFrame = pd.read_csv(zipObj.open(csv_nm), names=csv_header)
+                    if not df.empty:
+                        try:
+                            row_date = datetime.datetime.strptime(df.iloc[0, 0], '%Y%m%d %H:%M').date()
+                        except ValueError:
+                            continue
+                        contract = OptionContract.from_filename(csv_nm)
+                        key = str(contract)
+                        if key not in issue_dates or row_date < issue_dates[key]:
+                            issue_dates[key] = row_date
+                            contracts_by_key[key] = OptionContract.from_filename(csv_nm, issue_date=row_date)
+
+        contracts = set(contracts_by_key.values())
+
+        if include_expired:
+            return contracts
+        else:
+            return {c for c in contracts if c.expiry >= as_of or c.issue_date <= as_of}
+
+    def option_contracts_old(self, symbol: str, as_of: datetime.date = None, include_expired=False, start: datetime.date = None) -> Set[OptionContract]:
+        """
+        Use the daily option zip files to get a list of option contracts
+        """
         path_zips = []
         path_zips.append(os.path.join(self.root, 'option', 'usa', 'daily', f'{symbol.lower()}_{as_of.year}_quote_american.zip'))
         if start:
@@ -58,7 +101,7 @@ class Client:
             with ZipFile(path_zip, 'r') as zipObj:
                 for csv_nm in zipObj.namelist():
                     df: pd.DataFrame = pd.read_csv(zipObj.open(csv_nm), names=getattr(CsvHeader, TickType.quote))
-                    df = df[df['bid_close'] != 0]
+                    # df = df[df['bid_close'] != 0]
                     if not df.empty:
                         contracts.add(OptionContract.from_filename(csv_nm, issue_date=datetime.datetime.strptime(df.iloc[0, 0], '%Y%m%d %M:%S').date()))  # '20230505 00:00'
         if include_expired:
@@ -101,12 +144,9 @@ class Client:
 
         return out
 
-
     def get_csv_names_in_zip(self, zip_path: Path) -> List[str]:
         with ZipFile(zip_path, 'r') as z:
             return z.namelist()
-
-
 
     def get_dct_path_csvs(self,
                           symbols: Iterable[Union[Equity, OptionContract]],
@@ -314,40 +354,6 @@ class Client:
             out_contracts[mat_date] += [c for c in contracts if c.expiry == mat_date and strike_range[0] <= c.strike <= strike_range[1]]
         return out_contracts
 
-    @staticmethod
-    def strike_to_atm_distance(price_underlying: pd.Series, strikes: np.ndarray) -> pd.DataFrame:
-        """
-            x0: time; y...: strikes; z...: distances from ATM
-            x0: time; y: priceUnderlying
-            return: x0: Time; y[strike]: distance from ATM
-        """
-        strikes_ = sorted(set(strikes))
-        strike_distance = Counter(np.array(strikes_[:-1]) - np.array(strikes_[1:])).most_common()[0][0]
-        df = pd.DataFrame({strike: (price_underlying - strike) for strike in strikes_}, index=price_underlying.index)
-        df = ((df.abs() // strike_distance) + 1) * np.sign(df)
-        return df
-
-    def list_missing_contracts(self, symbol: Equity, resolution, tick_type, security_type=SecurityType.option) -> Dict[datetime.date, List[OptionContract]]:
-        from options.helper import is_holiday  # local to avoid circular import
-
-        missing_contracts = defaultdict(list)
-        contracts = self.option_contracts(str(symbol))
-        for contract in contracts:
-            for dt in pd.date_range(start, end, freq='D'):
-                if is_holiday(dt) or dt.date() >= contract.expiry or dt.date() < contract.issue_date:
-                    continue
-                date = dt.strftime('%Y%m%d')
-                underlying_folder = symbol.underlying_symbol.lower() if isinstance(symbol, OptionContract) else str(symbol).lower()
-                for directory, subdirectories, files in os.walk(os.path.join(self.root, security_type, self.market, resolution, underlying_folder)):
-                    for file in files:
-                        if file.endswith('.zip') and file[:8] == date and tick_type in file:
-                            csv_name = contract.csv_name(tick_type, resolution, dt)
-                            with ZipFile(os.path.join(directory, file), 'r') as zipObj:
-                                if csv_name not in zipObj.namelist():
-                                    logger.warning(f'Missing {csv_name} in {file}')
-                                    missing_contracts[dt].append(contract)
-        return missing_contracts
-
 
 def read_option_csvs_from_zip(file_full_path: Path, csvNmSymDts: List[CsvNmSymDt], tick_type: TickType) -> Dict[str, pd.DataFrame]:
     output = {}
@@ -390,11 +396,21 @@ def read_option_csvs_from_zip(file_full_path: Path, csvNmSymDts: List[CsvNmSymDt
 
 if __name__ == '__main__':
     # from options.helper import is_holiday
-    start = datetime.date(2023, 9, 5)
-    end = datetime.date(2023, 10, 11)
+    start = datetime.date(2026, 3, 9)
+    end = datetime.date(2026, 3, 9)
     client = Client()
     sym = 'dell'
     equity = Equity(sym)
+
+    contracts = client.get_all_contracts(Equity("ORCL"), start, end)
+    skipped = [c for c in contracts if c.issue_date and c.issue_date > end]
+    len(skipped)
+
+    read_option_csvs_from_zip(
+        file_full_path=Path(r'D:\trade\data\option\usa\tick\orcl\20260309_trade_american.zip'),
+        csvNmSymDts=[CsvNmSymDt('20260309_orcl_tick_trade_american_call_3400000_20260320.csv', '20260309_orcl_tick_trade_american_put_3400000_202603', datetime.date(2026, 3, 9))],
+        tick_type=TickType.trade
+    )
 
     # print(is_holiday(datetime.date(2024, 1, 15)))
 

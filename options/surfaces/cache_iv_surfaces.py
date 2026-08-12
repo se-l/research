@@ -3,9 +3,6 @@ from datetime import date
 
 from typing import List
 from multiprocessing import Pool
-
-import pandas as pd
-
 from options.calibrate_yield_curve import calibrate_yield_curve_and_store
 from options.helper import get_pkl_cache_key
 from options.surfaces.processors import get_v_ivs
@@ -132,8 +129,8 @@ if __name__ == "__main__":
     - IV of nearest neighbor stocks, sector and overall market
     - historical stock vol changes. so actual vol vs implied vol ( can be accomplished with daily data )
     """
-    # Test calibration on the last tenor. Both IV and price are massively off mid price/iv
-    equities = ["CRWD"]
+    # Test calibration on the last tenor. Both IV and price are massively off mid-price/iv
+    equities = ["PEP"]
 
     # # list_valid_training_sym_dates(['NKE'])
     # clear_cache('HPE')

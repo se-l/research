@@ -170,83 +170,6 @@ def jac_price_surface_theta_rho_ps(
 
     # J is (m, n): m = n_opt residuals, n = n_params
     return (r_plus - r_minus).T / (2.0 * h[None, :])
-#
-# # @timer
-# def jac_price_surface_theta_rho_ps_2_point(
-#         calibration_params: List[float],
-#         item_prices, s, k, t, v_is_call, mny_fwd_ln, tenor_offsets,
-#         dividends, calculation_date,
-#         diff_step: float
-# ):
-#     """
-#     One GPU call to compute:
-#       - base residuals r(x)
-#       - perturbed residuals r(x_eps_j) for all params j (for Jacobian columns)
-#     """
-#     x = np.asarray(calibration_params, dtype=np.float64)
-#     n_params = x.size
-#     n_opt = len(t)
-#
-#     # Build (n_params + 1) parameter vectors: base + one per-parameter perturbation
-#     X = np.tile(x, (n_params + 1, 1))
-#     deltas = np.zeros(n_params, dtype=np.float64)
-#
-#     for j in range(n_params):
-#         if x[j] != 0.0:
-#             X[j + 1, j] = x[j] * (1.0 + diff_step)
-#             deltas[j] = X[j + 1, j] - x[j]
-#         else:
-#             X[j + 1, j] = x[j] + diff_step
-#             deltas[j] = diff_step
-#
-#     # Build model_iv for every scenario (CPU-side assembly; GPU does pricing in one batch)
-#     model_iv_all = np.empty(((n_params + 1), n_opt), dtype=np.float64)
-#
-#     for p_ix in range(n_params + 1):
-#         params = X[p_ix]
-#
-#         v_theta = np.empty(n_opt, dtype=np.float64)
-#         v_rho = np.empty(n_opt, dtype=np.float64)
-#         v_psi = np.empty(n_opt, dtype=np.float64)
-#
-#         for i, (start, end) in enumerate(tenor_offsets):
-#             v_theta[start:end] = params[i * 3 + 0]
-#             v_rho[start:end] = params[i * 3 + 1]
-#             v_psi[start:end] = params[i * 3 + 2]
-#
-#         model_iv_all[p_ix] = np.sqrt(f_essvi_total_variance(mny_fwd_ln, v_theta, v_rho, v_psi) / t)
-#
-#     # Tile option inputs to match the flattened iv vector
-#     s_all = np.tile(np.asarray(s, dtype=np.float64), n_params + 1)
-#     k_all = np.tile(np.asarray(k, dtype=np.float64), n_params + 1)
-#     t_all = np.tile(np.asarray(t, dtype=np.float64), n_params + 1)
-#     v_is_call_all = np.tile(np.asarray(v_is_call, dtype=np.int32), n_params + 1)
-#
-#     prices_all = get_price_cuda(
-#         s=s_all,
-#         k=k_all,
-#         t=t_all,
-#         v_is_call=v_is_call_all,
-#         iv=model_iv_all.reshape(-1),
-#         dividends=dividends,
-#         calculation_date=calculation_date,
-#         cpu=False
-#     )
-#     prices_all = np.asarray(prices_all, dtype=np.float64).reshape((n_params + 1), n_opt)
-#
-#     residuals_all = prices_all - np.asarray(item_prices, dtype=np.float64)[None, :]
-#     # for j in range(n_params + 1):
-#     #     _cache_put(_key_from_x(X[j, :]), residuals_all[j, :])
-#
-#     r0 = residuals_all[0]
-#
-#     # Jacobian
-#     r_eps = residuals_all[1:]  # (n_params, n_opt)
-#
-#     # J is (m, n): m = n_opt residuals, n = n_params
-#     J = (r_eps - r0[None, :]).T / deltas[None, :]
-#
-#     return J
 
 def _key_from_x(x: NDArray) -> bytes:
     x = np.asarray(x, dtype=np.float64)
@@ -721,46 +644,6 @@ class IVSurface:
     def next_release_date(self, calc_date: date) -> date:
         return next(iter([d for d in EarningsPreSessionDates(self.underlying.symbol) if d >= calc_date]), date.max)
 
-    # def calibrate_surface_arb_free(self, samples: Dict[date, CalibrationItem], verbose=True):
-    #     self._validate_calibration_samples(samples)
-    #     t0 = time.time()
-    #     tenors = sorted(samples.keys())
-    #     n_tenors = len(tenors)
-    #
-    #     # theta0, rho, a, c
-    #     model_params = [0.05]  # theta0
-    #     model_params += [0] * n_tenors  # rho
-    #     model_params += [1e-3] * (n_tenors - 1)  # a
-    #     model_params += [0.5] * n_tenors  # c
-    #     model_params = np.array(model_params)
-    #
-    #     bounds_left = [0]
-    #     bounds_left += [-1] * n_tenors
-    #     bounds_left += [0] * (n_tenors - 1)
-    #     bounds_left += [-1] * n_tenors
-    #
-    #     bounds_right = [np.inf]
-    #     bounds_right += [1] * n_tenors
-    #     bounds_right += [np.inf] * (n_tenors - 1)
-    #     bounds_right += [1] * n_tenors
-    #
-    #     n_residuals = sum([len(item.iv) for item in samples.values()])
-    #     fit_res = least_squares(f_min_reparameterized, model_params, args=(samples, get_price_cuda, n_residuals), verbose=verbose, max_nfev=1000,
-    #                             bounds=(bounds_left, bounds_right)
-    #                             )
-    #     info(f'Calibrated arb free in {time.time() - t0:.2f}sec for {self.underlying}')
-    #
-    #     v_theta, v_rho, v_psi = convert_rho_b_c2theta_rho_psi(fit_res.x, len(samples))
-    #
-    #     for i, (tenor_dt, item) in enumerate(samples.items()):
-    #         self.calibration_items[item.tenor_dt] = item
-    #         self.params[item.tenor_dt] = SSVITenorParams(v_theta[i], v_rho[i], v_psi[i])
-    #
-    #     self.is_calibrated = True
-    #     self.evaluate()
-    #
-    #     return self
-
     @staticmethod
     def _validate_calibration_samples(items: Dict[date, CalibrationItem]):
         prev_tenor = None
@@ -911,6 +794,11 @@ class IVSurface:
         diff_step = 0.01
         div_amounts, div_times = dividends2amount_times(dividends, calculation_date)
         mny_fwd_ln = np.log(get_moneyness_fwd(equity, k, s, t, date_to_sod(calculation_date), zero_rates))
+
+        # for v in [bids, asks, s, k, t, v_is_call, mny_fwd_ln]:
+        #     print(f"# Missing {np.isnan(v).sum()})")
+        #     print(f"Len {len(v)})")
+        #     print(f"Sum: {sum(v)})")
 
         res, _ = jl.Fino.CalibrateIVS.calibrate_surface(
             jl.Vector[jl.Float32](np.array(calibration_params, dtype=np.float32)),
@@ -1271,3 +1159,16 @@ def plot_calibration_surface_debug(
 
     fig.update_layout(title=title, height=300 * len(tenors))
     show(fig, fn=fn, open_browser=open_browser)
+
+if __name__ == '__main__':
+    import pickle, os
+    cache_key = 'v_ivs-c1d8c15a9e0045f8a9c2eeea2aa522b7.pkl'
+    with open(os.path.join(r'D:\trade\Analytics\analysis_frames', cache_key), 'rb') as f:
+        v_ivs = pickle.load(f)
+    ivs = v_ivs[0]
+    print('# Params')
+    print(ivs.params)
+    print('# Params end')
+    ivs.plot_model_params(ivs.last_calibration_ts().date())
+    ivs.plot_surface_vanilla(ivs.last_calibration_ts().date())
+    # print(ivs.evaluate())
