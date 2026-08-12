@@ -1,4 +1,6 @@
 import os
+import sys
+
 import numpy as np
 import pandas as pd
 from scipy.optimize import curve_fit
@@ -9,7 +11,7 @@ from pandas.tseries.holiday import USFederalHolidayCalendar
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
-from connector.api_minlp.common import get_density_for_bimodal_t_dist
+from options.helper import get_density_for_bimodal_t_dist
 from shared.paths import Paths
 from shared.plotting import show
 from shared.modules.logger import info
@@ -37,7 +39,8 @@ def transform(df: pd.DataFrame):
 def run():
     df = load()
     df = transform(df)
-    summarize(df.copy())
+    if sys.platform == 'win32':
+        summarize(df.copy())
     return df
 
 def fit_bimodal_t_dist(returns: np.ndarray, p: np.ndarray):
@@ -53,7 +56,7 @@ def summarize(df: pd.DataFrame, min_bn_cap=10_000):
     mean_abs_return = df['%return'].dropna().drop(df.index[df['%return'] == 0]).abs().mean()
     print(f'Mean abs return: {mean_abs_return:.2f}% over {len(df)} announcements in {len(df["Symbol"].unique())} companies.')
 
-    disk_tickers = [el.upper() for el in os.listdir(r'D:\trade\data\option\usa\second')]
+    disk_tickers = [el.upper() for el in os.listdir(Paths.path_data.joinpath('option', 'usa', 'second'))]
     # Filter for relevant
     df_s = df[
         (df['Market Cap(M)'].fillna(0) > min_bn_cap)
@@ -155,7 +158,7 @@ def next_x_opportunities(start: date, end: date, min_bn_cap=10_000):
 
 
 if __name__ == '__main__':
-    root = r'D:\trade\EarningsAnnouncements'
+    root = Paths.path_trade.joinpath('EarningsAnnouncements')
     next_x_opportunities(date.today(), date.today() + timedelta(days=8))
     df = run()
     store_json(df)

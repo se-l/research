@@ -1,11 +1,13 @@
 import os
-
 from pathlib import Path
+from dotenv import load_dotenv
 
-log_fn = 'log_{}.txt'
 fp = Path(__file__)
 src_path = fp.resolve().parents[1]
 
+# Load .env relative to the project directory so it works from any working directory
+env_path = src_path / '.env'
+load_dotenv(dotenv_path=env_path)
 
 class Paths:
     """

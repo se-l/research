@@ -10,7 +10,6 @@ import multiprocessing
 import matplotlib.pyplot as plt
 import os
 import numpy as np
-# import py_vollib_vectorized
 
 from hashlib import sha256
 from datetime import date, datetime, time, timedelta
@@ -1452,6 +1451,7 @@ def df2iv_european(df: pd.DataFrame, price_col_nm: str, rate: float, dividend_yi
     return v
 
 def get_v_iv_european(p: np.ndarray, s: np.ndarray, k: np.ndarray, t: np.ndarray, r: float, rights: np.ndarray, q: float) -> np.ndarray:
+    import py_vollib_vectorized
     return py_vollib_vectorized.vectorized_implied_volatility(p, s, k, t, r, rights, q=q, model='black_scholes_merton', return_as='numpy')
 
 

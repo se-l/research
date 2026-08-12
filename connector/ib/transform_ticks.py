@@ -5,7 +5,7 @@ from connector.raw_data_processors import process_ticks_to_bars, process_hour_da
 from options.types.enums import SecurityType
 from shared.modules.logger import info
 
-n_processes = 1
+n_processes = 4
 market = 'usa'
 
 
@@ -28,7 +28,7 @@ if __name__ == '__main__':
 
     # v_config = [RawDataConfig(datetime.date(2025, 12, 16), datetime.date(2025, 12, 22), 'FDX')]
 
-    v_ticker = ["WDC"]
+    v_ticker = ["AMAT"]
 
     # v_config_eq = []
     # v_config_op = []
