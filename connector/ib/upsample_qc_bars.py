@@ -10,7 +10,7 @@ from pathlib import Path
 import pandas as pd
 
 from collections import defaultdict
-from connector.constants import file_root
+from shared.constants import file_root
 from connector.ib.enums import TradeType
 from options.client import Client
 

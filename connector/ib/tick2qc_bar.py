@@ -9,7 +9,7 @@ from typing import List, Dict
 import pandas as pd
 import multiprocessing
 
-from connector.constants import file_root, resampleFactor
+from shared.constants import file_root, resampleFactor
 from pathlib import Path
 from zipfile import ZipFile
 

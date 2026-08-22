@@ -10,7 +10,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import List, Dict
 
-from connector.constants import file_root, dt_fmt_ymd
+from shared.constants import file_root, dt_fmt_ymd
 from connector.ib.enums import TradeType
 from connector.ib.upsample_qc_bars import header
 from options.client import Client

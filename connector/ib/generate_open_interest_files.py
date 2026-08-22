@@ -2,7 +2,7 @@ import os
 import zipfile
 import io
 import pandas as pd
-from connector.constants import file_root
+from shared.constants import file_root
 
 
 def gen_openinterest_files(sec_type, market, resolution, symbol, start_date):

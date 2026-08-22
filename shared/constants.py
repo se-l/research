@@ -1,12 +1,15 @@
 import os
 import datetime
 import json
-from functools import lru_cache
-
 import json5
 
+from functools import lru_cache
 from shared.modules.logger import error
 from shared.paths import Paths
+from dotenv import dotenv_values
+
+cfg = dotenv_values("../.env")
+
 file_root = Paths.path_data
 
 try:
@@ -47,3 +50,14 @@ USA = 'usa'
 SECOND = 'second'
 MINUTE = 'minute'
 HOUR = 'hour'
+
+# connector.ib
+n_ticks_requested = 1000
+resampleFactor = {
+    'minute': '1min',
+    'second': '1s',
+}
+IP = '127.0.0.1'
+# PORT = 4001  # IB Gateway
+PORT = 7497  # TWS
+file_root = cfg['PATH_TRADE']

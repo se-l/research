@@ -11,12 +11,11 @@ from typing import List
 from connector.ib.enums import TradeType, Resolution
 from connector.ib.generate_open_interest_files import gen_openinterest_files
 from connector.ib.tick2qc_bar import upsample_ticks_with_args
-from connector.constants import file_root, dt_fmt_ymd
+from shared.constants import file_root, dt_fmt_ymd, EarningsPreSessionDates
 from connector.ib.upsample_qc_equity_bars import upsample_equity_bars
 from connector.ib.upsample_qc_option_bars import upsample_option_bars
 from options.helper import add_trade_days
 from options.types.enums import SecurityType, TickType
-from shared.constants import EarningsPreSessionDates
 from shared.modules.logger import info
 from shared.paths import Paths
 
