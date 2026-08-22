@@ -1,11 +1,11 @@
 import datetime
 import os
-from typing import Set
-from zipfile import ZipFile
-
 import pandas as pd
 
-root = r'C:\repos\trade\data'
+from typing import Set
+from zipfile import ZipFile
+from shared.paths import Paths
+
 market = 'usa'
 
 
@@ -28,7 +28,7 @@ def check(security_type, start, to):
                     continue
                 date = dt.strftime('%Y%m%d')
                 contracts = set()
-                for directory, subdirectories, files in os.walk(os.path.join(root, security_type, market, resolution, symbol.lower())):
+                for directory, subdirectories, files in os.walk(os.path.join(Paths.path_data, security_type, market, resolution, symbol.lower())):
                     if missing_zips := {os.path.join(directory, f) for f in expected_filenames(security_type, resolution, date) - set(files)}:
                         pull_zips = pull_zips.union(missing_zips)
                         print(f'Missing .zip file: {missing_zips}')

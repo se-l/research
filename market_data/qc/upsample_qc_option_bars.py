@@ -12,7 +12,7 @@ import pandas as pd
 from collections import defaultdict
 from shared.constants import file_root
 from connector.ib.enums import TradeType
-from connector.ib.upsample_qc_bars import header
+from market_data.qc.upsample_qc_bars import header
 from options.client import Client
 from options.types.enums import SecurityType, Resolution
 from shared.modules.logger import info

@@ -9,11 +9,11 @@ from pathlib import Path
 from typing import List
 
 from connector.ib.enums import TradeType, Resolution
-from connector.ib.generate_open_interest_files import gen_openinterest_files
-from connector.ib.tick2qc_bar import upsample_ticks_with_args
+from market_data.qc.generate_open_interest_files import gen_openinterest_files
+from market_data.qc.tick2qc_bar import upsample_ticks_with_args
 from shared.constants import file_root, dt_fmt_ymd, EarningsPreSessionDates
-from connector.ib.upsample_qc_equity_bars import upsample_equity_bars
-from connector.ib.upsample_qc_option_bars import upsample_option_bars
+from market_data.qc.upsample_qc_equity_bars import upsample_equity_bars
+from market_data.qc.upsample_qc_option_bars import upsample_option_bars
 from options.helper import add_trade_days
 from options.types.enums import SecurityType, TickType
 from shared.modules.logger import info
@@ -485,8 +485,16 @@ def fix_entries_to_zip(fix_entries: list) -> list:
 
 
 if __name__ == '__main__':
-    scan_root_for_bad_zip_members(r'D:\trade\data\option\usa\tick\fdx', remove=True)
-    scan_root_for_bad_zip_members(r'D:\trade\data\equity\usa\tick\fdx', remove=True)
+    pass
+    # scan_root_for_bad_zip_members(r'D:\trade\data\option\usa\tick\fdx', remove=True)
+    # scan_root_for_bad_zip_members(r'D:\trade\data\equity\usa\tick\fdx', remove=True)
+
+    # deleting_tmp_file(r'D:\trade\data\option\usa\tick')
+    # deleting_tmp_file(r'D:\trade\data\equity\usa\tick')
+
+    # rm_duplicate_zip_entry_names(r'D:\trade\data\equity\usa\minute')
+    # rm_duplicate_zip_entry_names(r'D:\trade\data\equity\usa\second')
+
     # fix_entries = [
     #     r'D:\trade\data\option\usa\tick\fdx\20241219_quote_american.zip',
     # ]

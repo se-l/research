@@ -12,7 +12,7 @@ from typing import List, Dict
 
 from shared.constants import file_root, dt_fmt_ymd
 from connector.ib.enums import TradeType
-from connector.ib.upsample_qc_bars import header
+from market_data.qc.upsample_qc_bars import header
 from options.client import Client
 from options.types.enums import Resolution
 

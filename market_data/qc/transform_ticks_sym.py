@@ -1,4 +1,4 @@
-from connector.raw_data_processors import process_ticks_to_bars, process_hour_daily_upsample, get_configs
+from market_data.qc.raw_data_processors import process_ticks_to_bars, process_hour_daily_upsample, get_configs
 from options.types.enums import SecurityType
 from shared.modules.logger import info
 

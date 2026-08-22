@@ -2,7 +2,7 @@ import datetime
 
 from connector.ib.enums import WhatToShow, IBSecType, Resolution
 from connector.ib.ib_client import fetch
-from connector.raw_data_processors import RawDataConfig, transform
+from market_data.qc.raw_data_processors import RawDataConfig, transform
 from options.helper import add_trade_days
 from shared.constants import EarningsPreSessionDates
 

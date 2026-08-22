@@ -4,7 +4,10 @@ My zip file has duplicate file names. Can you show me sample code how to remove 
 import os
 import shutil
 import zipfile
-root = r'C:\repos\trade\data\option'
+
+from shared.paths import Paths
+
+root = Paths.path_data.joinpath('option')
 
 
 def rm_dups(trade_type):

@@ -50,6 +50,7 @@ USA = 'usa'
 SECOND = 'second'
 MINUTE = 'minute'
 HOUR = 'hour'
+market = 'usa'
 
 # connector.ib
 n_ticks_requested = 1000
