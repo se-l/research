@@ -2,14 +2,15 @@ import os
 import zipfile
 import io
 import pandas as pd
-from shared.constants import file_root
+
+from shared.paths import Paths
 
 
 def gen_openinterest_files(sec_type, market, resolution, symbol, start_date):
     if resolution == 'daily':
-        path = os.path.join(file_root, sec_type, market, resolution)
+        path = os.path.join(Paths.path_data, sec_type, market, resolution)
     else:
-        path = os.path.join(file_root, sec_type, market, resolution, symbol)
+        path = os.path.join(Paths.path_data, sec_type, market, resolution, symbol)
 
     for directory, subdirectories, files in os.walk(path):
         for fn in files:  # Open the ZIP archive in read mode

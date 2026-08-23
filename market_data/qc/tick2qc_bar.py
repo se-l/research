@@ -3,13 +3,14 @@ Convert zipped files containing tick data quote to qc bar data.
 """
 import io
 import os
-from datetime import date
-from typing import List, Dict
-
+import numpy as np
 import pandas as pd
 import multiprocessing
 
-from shared.constants import file_root, resampleFactor
+from datetime import date
+from typing import List, Dict
+from shared.constants import resampleFactor, market
+from shared.paths import Paths
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -17,12 +18,8 @@ from connector.ib.enums import TradeType, Resolution
 from connector.ib.typess.TickBidAsk import TickBidAsk
 from connector.ib.typess.TickTrade import TickTrade
 from dataclasses import fields
-import numpy as np
-
 from options.types.enums import SecurityType, TickType
 from shared.modules.logger import info
-
-market = 'usa'
 
 
 def first_non_zero(ps: pd.Series):
@@ -105,7 +102,7 @@ def csv_name(tick_csv_name, resolution, tick_type, sec_type):
 def underlying_namelists(sec_type, market, symbol) -> Dict[str, List[str]]:
     """return a list of all the namelists for the underlying symbol"""
     dct = {}
-    tick_path = os.path.join(file_root, sec_type, market, Resolution.tick, symbol)
+    tick_path = os.path.join(Paths.path_data, sec_type, market, Resolution.tick, symbol)
     if sec_type == 'option':
         for directory, subdirectories, files in os.walk(tick_path):
             for fn in files:
@@ -132,7 +129,7 @@ def upsample_ticks_with_args(
         overwrite: bool = True,
         skip_zip: bool = False
     ):
-    tick_path = os.path.join(file_root, sec_type, market, Resolution.tick, symbol)
+    tick_path = os.path.join(Paths.path_data, sec_type, market, Resolution.tick, symbol)
     for directory, subdirectories, files in os.walk(tick_path):
         for fn in files:
             if start_date and fn[:len(start_date)] < start_date:
@@ -196,7 +193,7 @@ def upsample_ticks_with_args(
 def move_timestamp_by_x_seconds(sec_type, market, resolution, symbol, tick_type, start_date=None, end_date=None):
     """changed pd.resample label from 'right' to 'left'"""
     seconds = {'second': 1, 'minute': 60, 'hour': 3600, 'daily': 86400}[resolution] * -1
-    resolution_path = os.path.join(file_root, sec_type, market, resolution, symbol)
+    resolution_path = os.path.join(Paths.path_data, sec_type, market, resolution, symbol)
     for directory, subdirectories, files in os.walk(resolution_path):
         for fn in files:
             if start_date and fn[:len(start_date)] < start_date:

@@ -13,11 +13,11 @@ from typing import List, Dict, Union, Set, Iterable
 from zipfile import ZipFile
 
 from options.types.security import Security #JL
-from shared.constants import file_root #JL
 from options.types.enums import TickType, CsvHeader, Resolution, SecurityType #JL
 from options.types.equity import Equity #JL
 from options.types.option_contract import OptionContract #JL as Option
 from shared.modules.logger import logger, warning, info
+from shared.paths import Paths
 
 bp = 10_000
 
@@ -33,7 +33,7 @@ class Client:
     """
     Client for reading data saved in QuantConnect format
     """
-    root = file_root
+    root = Paths.path_data
     market = 'usa'
 
     def __init__(self, root: str = None, market: str = None):

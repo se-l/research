@@ -1,10 +1,9 @@
 import os
 import sys
-
 import numpy as np
 import pandas as pd
-from scipy.optimize import curve_fit
 
+from scipy.optimize import curve_fit
 from scipy.stats import t
 from datetime import date, datetime, timedelta
 from pandas.tseries.holiday import USFederalHolidayCalendar

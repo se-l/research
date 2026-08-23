@@ -10,7 +10,6 @@ from pathlib import Path
 import pandas as pd
 
 from collections import defaultdict
-from shared.constants import file_root
 from connector.ib.enums import TradeType
 from market_data.qc.upsample_qc_bars import header
 from options.client import Client
@@ -20,7 +19,7 @@ from shared.modules.logger import info
 client = Client()
 
 def load(sec_type, market, resolution_from, symbol, trade_type, start_date, end_date=None):
-    path_from = os.path.join(file_root, sec_type, market, resolution_from, symbol)
+    path_from = os.path.join(Paths.path_data, sec_type, market, resolution_from, symbol)
 
     dt_contract_df = defaultdict(dict)
     yr_contract_dct = defaultdict(lambda: defaultdict(list))
@@ -120,7 +119,7 @@ def upsample_option_bars(
     if resolution_to not in ['daily', 'hour']:
         raise ValueError(f'Invalid resolution_to: {resolution_to}')
 
-    path_to = os.path.join(file_root, sec_type, market, resolution_to)
+    path_to = os.path.join(Paths.path_data, sec_type, market, resolution_to)
     dt_contract_df, yr_contract_dct = load(sec_type, market, resolution_from, symbol, trade_type, start_date, end_date)
 
     yr_contract_dct = transform(dt_contract_df, yr_contract_dct, trade_type, resolution_to)

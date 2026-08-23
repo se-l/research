@@ -11,7 +11,7 @@ from typing import List
 from connector.ib.enums import TradeType, Resolution
 from market_data.qc.generate_open_interest_files import gen_openinterest_files
 from market_data.qc.tick2qc_bar import upsample_ticks_with_args
-from shared.constants import file_root, dt_fmt_ymd, EarningsPreSessionDates
+from shared.constants import dt_fmt_ymd, EarningsPreSessionDates
 from market_data.qc.upsample_qc_equity_bars import upsample_equity_bars
 from market_data.qc.upsample_qc_option_bars import upsample_option_bars
 from options.helper import add_trade_days
@@ -29,7 +29,7 @@ class RawDataConfig:
 
 def clean_up(yyyyMMdd):
     """delete all files from root folder that start with 20230705"""
-    for root, dirs, files in os.walk(file_root):
+    for root, dirs, files in os.walk(Paths.path_data):
         for fn in files:
             if fn.startswith(yyyyMMdd):
                 print(f'Removing file {os.path.join(root, fn)}')
@@ -259,21 +259,6 @@ def process_open_interest(configs: List[RawDataConfig]):
         print(progress, end='', flush=True)
 
 
-def move_live_data(dt_in: datetime.date, rev=False):
-    dt = dt_in.strftime(dt_fmt_ymd)
-    for directory, subdirectories, files in os.walk(file_root.replace('data', 'dataLive') if rev else file_root):
-        for fn in files:
-            if fn.startswith(dt):
-                print(f'Moving {os.path.join(directory, fn)} to live data folder')
-                target_folder = directory.replace('dataLive', 'data') if rev else directory.replace('data', 'dataLive')
-                if not os.path.exists(target_folder):
-                    os.makedirs(target_folder)
-                if not os.path.exists(os.path.join(target_folder, fn)):
-                    os.rename(os.path.join(directory, fn), os.path.join(target_folder, fn))
-                else:
-                    os.remove(os.path.join(directory, fn))
-
-
 def upsample_iv(configs: List[RawDataConfig]):
     for cfg in configs:
         for symbol in cfg.tickers.split(','):
@@ -285,7 +270,7 @@ def upsample_iv(configs: List[RawDataConfig]):
 
 
 def cp2local(sym):
-    src_dir = file_root
+    src_dir = Paths.path_data
     fn2copy = lambda fn_, dir_: fn in ('market-hours-database.json', 'interest-rate.csv') or sym in fn_ or dir_ in (sym, 'symbol-properties')
     for directory, subdirectories, files in os.walk(src_dir):
         dir_name = Path(directory).name

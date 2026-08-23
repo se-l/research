@@ -1,16 +1,6 @@
 """
 Convert zipped files containing tick data quote to qc bar data.
 """
-import io
-import multiprocessing
-import os
-import zipfile
-from pathlib import Path
-
-import pandas as pd
-
-from collections import defaultdict
-from shared.constants import file_root
 from connector.ib.enums import TradeType
 from options.client import Client
 

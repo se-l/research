@@ -6,11 +6,6 @@ import json5
 from functools import lru_cache
 from shared.modules.logger import error
 from shared.paths import Paths
-from dotenv import dotenv_values
-
-cfg = dotenv_values("../.env")
-
-file_root = Paths.path_data
 
 try:
     with open(Paths.path_dividend_yields, 'r') as fh:
@@ -60,5 +55,3 @@ resampleFactor = {
 }
 IP = '127.0.0.1'
 # PORT = 4001  # IB Gateway
-PORT = 7497  # TWS
-file_root = cfg['PATH_TRADE']

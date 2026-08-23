@@ -10,17 +10,18 @@ from collections import defaultdict
 from pathlib import Path
 from typing import List, Dict
 
-from shared.constants import file_root, dt_fmt_ymd
+from shared.constants import dt_fmt_ymd
 from connector.ib.enums import TradeType
 from market_data.qc.upsample_qc_bars import header
 from options.client import Client
 from options.types.enums import Resolution
+from shared.paths import Paths
 
 client = Client()
 
 
 def load(sec_type, market, resolution_from, symbol, trade_type, start_date, end_date=None):
-    path_from = os.path.join(file_root, sec_type, market, resolution_from, symbol)
+    path_from = os.path.join(Paths.path_data, sec_type, market, resolution_from, symbol)
 
     dt_contract_df = defaultdict(dict)
 
@@ -77,7 +78,7 @@ def upsample_equity_bars(sec_type, market, resolution_from, resolution_to, symbo
 
     trade_type = TradeType.trade
 
-    path_to = os.path.join(file_root, sec_type, market, resolution_to)
+    path_to = os.path.join(Paths.path_data, sec_type, market, resolution_to)
     dt_contract_df = load(sec_type, market, resolution_from, symbol, trade_type, start_date, end_date)
 
     records = transform(dt_contract_df, trade_type, resolution_to)

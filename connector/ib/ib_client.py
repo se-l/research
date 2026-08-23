@@ -15,7 +15,7 @@ from ibapi.wrapper import EWrapper
 from ibapi.contract import Contract, ContractDetails
 from ibapi.common import BarData, HistoricalTickBidAsk, HistoricalTick, HistoricalTickLast
 from datetime import datetime, timedelta, date
-from shared.constants import file_root, IP, PORT, dt_fmt_eastern, n_ticks_requested, TZ_USEASTERN, dt_fmt_ymd, dt_fmt_ib_bar, TZ_UTC, dt_fmt_iso
+from shared.constants import IP, PORT, dt_fmt_eastern, n_ticks_requested, TZ_USEASTERN, dt_fmt_ymd, dt_fmt_ib_bar, TZ_UTC, dt_fmt_iso
 from connector.ib.contract import make_contract
 from connector.ib.enums import TradeType, WhatToShow, Exchange, Resolution, IBSecType
 from connector.ib.typess.QuoteBar import QuoteBar
@@ -450,9 +450,9 @@ def get_contract(task: Task) -> Contract:
 
 def get_file_path_zip(task: Task, date: str, mkdir: bool = False) -> Path:
     if task.sec_type == IBSecType.OPT:
-        zip_path = Path(os.path.join(file_root, SecurityType.option, task.market, task.resolution, task.symbol.lower(), f'{date}_{map_trade_type[task.whatToShow]}_american.zip'))
+        zip_path = Path(os.path.join(Paths.path_data, SecurityType.option, task.market, task.resolution, task.symbol.lower(), f'{date}_{map_trade_type[task.whatToShow]}_american.zip'))
     elif task.sec_type == IBSecType.STK:
-        zip_path = Path(os.path.join(file_root, SecurityType.equity, task.market, task.resolution, task.symbol.lower(), f'{date}_{map_trade_type[task.whatToShow]}.zip'))
+        zip_path = Path(os.path.join(Paths.path_data, SecurityType.equity, task.market, task.resolution, task.symbol.lower(), f'{date}_{map_trade_type[task.whatToShow]}.zip'))
     else:
         raise ValueError(f'Unknown sec_type: {task.sec_type}')
 
