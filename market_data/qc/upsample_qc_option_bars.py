@@ -5,16 +5,16 @@ import io
 import multiprocessing
 import os
 import zipfile
-from pathlib import Path
-
 import pandas as pd
 
+from pathlib import Path
 from collections import defaultdict
 from connector.ib.enums import TradeType
 from market_data.qc.upsample_qc_bars import header
 from options.client import Client
 from options.types.enums import SecurityType, Resolution
 from shared.modules.logger import info
+from shared.paths import Paths
 
 client = Client()
 

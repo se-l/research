@@ -6,7 +6,7 @@ from options.types.enums import SecurityType
 from shared.modules.logger import info
 from datetime import date
 
-n_processes = multiprocessing.cpu_count() // 4
+n_processes = multiprocessing.cpu_count() // 2
 
 def transform_earnings(v_ticker, takes=None):
     v_config_eq = get_configs(v_ticker, n_days_lookback=-20, takes=takes)
