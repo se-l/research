@@ -24,18 +24,18 @@ def transform_dates(v_ticker, dt):
 
 def transform(v_config_eq=None, v_config_op=None):
     if v_config_eq:
-        process_ticks_to_bars(v_config_eq, skip_zip=False, security_types=(SecurityType.equity,), n_processes=n_processes)
+        process_ticks_to_bars(v_config_eq, skip_zip=True, security_types=(SecurityType.equity,), n_processes=n_processes)
         process_hour_daily_upsample(v_config_eq, security_types=(SecurityType.equity,), n_processes=n_processes)
 
     if v_config_op:
-        process_ticks_to_bars(v_config_op, skip_zip=False, security_types=(SecurityType.option,), n_processes=n_processes)
+        process_ticks_to_bars(v_config_op, skip_zip=True, security_types=(SecurityType.option,), n_processes=n_processes)
         process_hour_daily_upsample(v_config_op, security_types=(SecurityType.option,), n_processes=n_processes)
 
     process_open_interest(v_config_op)  # replace with polygon downloader
 
 
 if __name__ == '__main__':
-    v_ticker = ["AMAT"]
+    v_ticker = ["DKS"]
     transform_earnings(v_ticker)
 
     # transform_dates(v_ticker, date(2099, 1, 1))

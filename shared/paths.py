@@ -5,8 +5,7 @@ from dotenv import dotenv_values
 
 fp = Path(__file__)
 src_path = fp.resolve().parents[1]
-
-cfg = dotenv_values("../.env")
+cfg = dotenv_values(src_path.joinpath(".env"))
 
 class Paths:
     """
