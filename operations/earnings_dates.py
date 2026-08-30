@@ -3,6 +3,7 @@ import sys
 import numpy as np
 import pandas as pd
 
+from functools import lru_cache
 from scipy.optimize import curve_fit
 from scipy.stats import t
 from datetime import date, datetime, timedelta
@@ -18,6 +19,7 @@ from shared.modules.logger import info
 cal = USFederalHolidayCalendar()
 
 
+@lru_cache(maxsize=1)
 def load():
     dfs = []
     for dir_, dirs, fns in os.walk(root):
@@ -25,6 +27,7 @@ def load():
             df = pd.read_csv(os.path.join(dir_, fn))
             df['ReleaseDate'] = datetime.strptime(fn.split('.')[0], '%Y%m%d').date()
             dfs.append(df)
+            info(f'load(): {fn}')
     return pd.concat(dfs).reset_index(drop=True)
 
 
@@ -137,6 +140,7 @@ def store_json(df_in):
 
     with open(Paths.path_earnings, 'w') as f:
         f.write(string)
+    info(f'store_json(): {Paths.path_earnings}')
 
 
 def next_x_opportunities(start: date, end: date, min_bn_cap=10_000):
