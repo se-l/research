@@ -23,13 +23,13 @@ def transform_dates(v_ticker, dt):
     transform(v_config_eq, v_config_op)
 
 def transform(v_config_eq=None, v_config_op=None):
-    if v_config_eq:
-        process_ticks_to_bars(v_config_eq, skip_zip=True, security_types=(SecurityType.equity,), n_processes=n_processes)
-        process_hour_daily_upsample(v_config_eq, security_types=(SecurityType.equity,), n_processes=n_processes)
-
-    if v_config_op:
-        process_ticks_to_bars(v_config_op, skip_zip=True, security_types=(SecurityType.option,), n_processes=n_processes)
-        process_hour_daily_upsample(v_config_op, security_types=(SecurityType.option,), n_processes=n_processes)
+    # if v_config_eq:
+    #     process_ticks_to_bars(v_config_eq, skip_zip=True, security_types=(SecurityType.equity,), n_processes=n_processes)
+    #     process_hour_daily_upsample(v_config_eq, security_types=(SecurityType.equity,), n_processes=n_processes)
+    #
+    # if v_config_op:
+    #     process_ticks_to_bars(v_config_op, skip_zip=True, security_types=(SecurityType.option,), n_processes=n_processes)
+    #     process_hour_daily_upsample(v_config_op, security_types=(SecurityType.option,), n_processes=n_processes)
 
     process_open_interest(v_config_op)  # replace with polygon downloader
 
