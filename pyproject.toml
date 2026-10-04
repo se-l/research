@@ -1,0 +1,19 @@
+[project]
+name = "research"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "json5>=0.15.0",
+    "lightgbm>=4.7.0",
+    "matplotlib>=3.11.1",
+    "numpy>=2.5.3",
+    "pandas>=3.0.5",
+    "pandas-stubs~=3.0.5",
+    "plotly>=7.0.0",
+    "python-dotenv>=1.2.4",
+    "quantlib>=1.43",
+    "sci-learn>=0.1.4",
+    "scikit-learn>=1.9.1",
+    "scipy>=1.18.1",
+    "scipy-stubs~=1.18.1",
+]
